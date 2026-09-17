@@ -1,0 +1,6 @@
+anthropic>=0.40      # the researchers + judges (needs ANTHROPIC_API_KEY)
+yfinance>=0.2        # real daily prices + exchange/market-cap data
+pandas>=2.0
+numpy>=1.24
+# Stooq is the no-key price fallback (stdlib urllib; no package needed).
+# For a more dependable feed later, swap market.get_daily() for Alpaca/Polygon.
