@@ -31,6 +31,8 @@ def get_daily(ticker: str, period: str = "13mo") -> pd.DataFrame:
         df = yf.download(ticker, period=period, interval="1d",
                          auto_adjust=True, progress=False)
         if len(df):
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
             df = df.rename(columns=str.lower)
             df.index.name = "date"
             return df[["close"]].dropna()
