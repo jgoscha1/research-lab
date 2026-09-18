@@ -313,6 +313,9 @@ button:hover{border-color:var(--mut)} .go{background:var(--up);color:#06210f;bor
 .stat{display:inline-block;margin-right:20px} .big{font-size:21px;font-weight:700} .mut{color:var(--mut);font-size:12px}
 .up{color:var(--up)} .dn{color:var(--dn)}
 .feed{max-height:340px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:4px}
+.feed.collapsed{display:none}
+.card-head{display:flex;align-items:center;justify-content:space-between;cursor:pointer;gap:8px}
+.card-head h3{margin:0} .chev{color:var(--mut);font-size:11px;transition:transform .15s} .chev.collapsed{transform:rotate(-90deg)}
 .m{max-width:90%;padding:7px 10px;border-radius:11px;font-size:13px;white-space:pre-wrap}
 .m.r{align-self:flex-start;background:#12203a} .m.j{align-self:flex-end;background:#2a2010} .m.s{align-self:center;color:var(--mut);font-size:12px;background:transparent}
 .who{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--mut);margin-bottom:2px}
@@ -337,7 +340,7 @@ h4{font-size:11px;text-transform:uppercase;color:var(--mut);margin:13px 0 3px} s
 <span class='stat'><span class='mut'>vs market</span><br><span class='big' id='p_pct'>\u2014</span></span>
 <div class='mut' id='p_bench' style='margin-top:6px'></div><div id='chart'></div></div>
 
-<div class='card'><h3>Live conversation</h3><div class='feed' id='feed'></div></div>
+<div class='card'><div class='card-head' onclick='toggleFeed()'><h3>Live conversation</h3><span class='chev' id='feedChev'>▼</span></div><div class='feed' id='feed'></div></div>
 <div class='card'><h3>Open positions</h3><div id='positions'></div></div>
 <div class='card'><h3>Closed positions</h3><div id='closed'></div></div>
 
@@ -353,6 +356,10 @@ h4{font-size:11px;text-transform:uppercase;color:var(--mut);margin:13px 0 3px} s
 <script>
 let lastEv=-1, STATE=null; const $=id=>document.getElementById(id);
 const BASE=location.pathname.replace(/\\/$/,'');
+function toggleFeed(force){let c;try{c=force!==undefined?force:localStorage.getItem('feedCollapsed')!=='1';}catch(e){c=force!==undefined?force:!$('feed').classList.contains('collapsed');}
+ $('feed').classList.toggle('collapsed',c);$('feedChev').classList.toggle('collapsed',c);
+ try{localStorage.setItem('feedCollapsed',c?'1':'0');}catch(e){}}
+try{toggleFeed(localStorage.getItem('feedCollapsed')==='1');}catch(e){}
 function fmt(n){return n==null?'\u2014':'$'+Math.round(n).toLocaleString()}
 function pc(n){return n==null?'\u2014':(n>=0?'+':'')+n.toFixed(1)+'%'}
 function chart(vals){if(!vals||vals.length<2)return"<p class='mut'>chart builds as it runs</p>";
