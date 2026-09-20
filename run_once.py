@@ -19,7 +19,7 @@ def main():
     if not config.ANTHROPIC_API_KEY:
         print("Set ANTHROPIC_API_KEY to run live research. (Offline: nothing to show.)")
         return
-    print(f"[{r['name']} / {r['judge']}] researching a Robinhood-buyable small cap…\n")
+    print(f"[{r['name']} / {r['judge']}] researching a Robinhood-buyable stock…\n")
     rec = llm.research(r, avoid=[])
     print("RECOMMENDATION:", rec.get("ticker"), "-", rec.get("name"))
     for k in ("driver", "thesis", "valuation", "catalyst", "risks", "conviction"):

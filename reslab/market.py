@@ -1,10 +1,9 @@
-"""Real market data + the "can I actually buy this on Robinhood, and is it a
-small cap?" gate.
+"""Real market data + the "can I actually buy this on Robinhood?" gate.
 
 Data via yfinance (any US-listed ticker: Nasdaq, NYSE, NYSE American) with a
-Stooq no-key fallback for prices. Eligibility uses yfinance's exchange +
-market-cap fields. Runs on your machine (needs internet); it will not run inside
-the Claude sandbox.
+Stooq no-key fallback for prices. Eligibility uses yfinance's exchange field —
+any market cap is eligible. Runs on your machine (needs internet); it will not
+run inside the Claude sandbox.
 
 Swap in a paid provider later by reimplementing get_daily() / get_quote() —
 nothing else changes.
@@ -66,12 +65,12 @@ def info(ticker: str) -> dict:
 
 
 def eligibility(ticker: str) -> dict:
-    """Is this a Robinhood-buyable small cap? Returns a verdict + the facts.
+    """Is this a Robinhood-buyable stock? Returns a verdict + the facts.
 
     Robinhood trades US stocks on major exchanges (Nasdaq / NYSE / NYSE American
     / Cboe) — NOT OTC/pink sheets. We only clear names we can verify sit on an
-    allowed exchange, are common equity, priced above the floor, and inside the
-    market-cap band.
+    allowed exchange, are common equity, and are priced above the penny-stock
+    floor. No market-cap band — any size is eligible.
     """
     d = info(ticker)
     exch = d.get("exchange")
@@ -88,11 +87,6 @@ def eligibility(ticker: str) -> dict:
             ok = False; reasons.append(f"exchange {exch} not Robinhood-eligible (OTC/other)")
     if qtype and qtype not in ("EQUITY", "ETF"):
         ok = False; reasons.append(f"not common equity ({qtype})")
-    if cap is not None:
-        if cap < config.MIN_MARKET_CAP: ok = False; reasons.append(f"market cap ${cap/1e6:.0f}M below floor")
-        if cap > config.MAX_MARKET_CAP: ok = False; reasons.append(f"market cap ${cap/1e9:.1f}B above small-cap ceiling")
-    else:
-        reasons.append("market cap unknown")
     if price is not None and price < config.MIN_PRICE:
         ok = False; reasons.append(f"price ${price:.2f} below floor")
 
