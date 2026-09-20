@@ -259,12 +259,18 @@ def research_trend(trend, rname):
         return f"{tk}: not Robinhood-buyable."
     verdict = llm.judge_new(r, rec)
     log("j", r["name"], f"{r['judge']}: {verdict.get('reasoning','')}", "verdict")
-    if verdict["decision"] == "accept" and pf.open_count() < config.MAX_OPEN_POSITIONS:
+    if verdict["decision"] != "accept":
+        log("s", r["name"], f"{tk}: {verdict['decision']} — not bought.", "sys")
+    elif pf.open_count() >= config.MAX_OPEN_POSITIONS:
+        log("s", r["name"], f"{tk}: accepted, but at max open positions — not bought.", "sys")
+    else:
         px = elig["price"] or price(tk)
         if px and pf.buy(tk, rec.get("name", tk), r["name"], rec.get("thesis", ""), px, config.INITIAL_POSITION):
             p = pf.position(tk); p["rec"] = rec; p["verdict"] = verdict
             log("s", r["name"], f"BOUGHT {tk} @ ${px:.2f} from your trend.", "sys")
             store.save(st)
+        else:
+            log("s", r["name"], f"{tk}: accepted, but no price available — not bought.", "sys")
     return f"{tk}: {verdict['decision']}."
 
 
