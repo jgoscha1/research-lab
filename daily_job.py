@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from reslab import config, market, llm, store, report
+from reslab import config, market, llm, store, report, trends
 from reslab.portfolio import Portfolio
 
 
@@ -62,33 +62,47 @@ def run():
             else:
                 pos["challenges"]["held"] += 1
 
-    # ---- researchers hunt new ideas ----
+    # ---- researchers hunt new ideas: each call finds a trend + up to 3 stocks ----
+    status_map = {"reject": "rejected", "watch": "watch"}
     for r in config.RESEARCHERS:
         rstate = state["researchers"].setdefault(r["name"], {"proposed": []})
         if pf.open_count() >= config.MAX_OPEN_POSITIONS:
             break
         avoid = pf.held_tickers() + rstate["proposed"][-40:]
         for _ in range(config.NEW_IDEAS_PER_DAY):
-            rec = llm.research(r, avoid)
-            if not rec or rec.get("_offline"):
+            result = llm.research(r, avoid)
+            if result.get("_offline"):
                 events.append(f"{r['name']}: live research unavailable (set ANTHROPIC_API_KEY).")
                 break
-            tk = (rec.get("ticker") or "").upper()
-            if not tk or tk in avoid:
-                continue
-            rstate["proposed"].append(tk); avoid.append(tk)
-            elig = market.eligibility(tk)
-            if not elig["tradeable"]:
-                events.append(f"{r['name']} → {tk}: skipped (not Robinhood-buyable: {', '.join(elig['reasons'])}).")
-                continue
-            verdict = llm.judge_new(r, rec)
-            if verdict["decision"] == "accept":
-                price = elig["price"] or market.last_price(tk)
-                if pf.buy(tk, rec.get("name", tk), r["name"], rec.get("thesis", ""), price, config.INITIAL_POSITION):
-                    pf.position(tk)["verdict"] = verdict
-                    events.append(f"BOUGHT {tk} @ ${price:.2f} (${config.INITIAL_POSITION:,.0f}) — {r['judge']}: {verdict.get('reasoning','')[:160]}")
-            else:
-                events.append(f"{r['name']} → {tk}: {verdict['decision']} — {r['judge']}: {verdict.get('reasoning','')[:160]}")
+            trend_text = result["trend"]
+            trend = trends.get_or_create(state, r["name"], trend_text, origin="auto")
+            events.append(f"{r['name']} trend: {trend_text}")
+            for rec in result["picks"][:3]:
+                tk = (rec.get("ticker") or "").upper()
+                if not tk or tk in avoid:
+                    continue
+                rstate["proposed"].append(tk); avoid.append(tk)
+                elig = market.eligibility(tk)
+                if not elig["tradeable"]:
+                    events.append(f"{r['name']} → {tk}: skipped (not Robinhood-buyable: {', '.join(elig['reasons'])}).")
+                    trends.record_stock(trend, rec, "not_tradeable")
+                    continue
+                verdict = llm.judge_new(r, rec, trend=trend_text)
+                if verdict["decision"] != "accept":
+                    events.append(f"{r['name']} → {tk}: {verdict['decision']} — {r['judge']}: {verdict.get('reasoning','')[:160]}")
+                    trends.record_stock(trend, rec, status_map.get(verdict["decision"], verdict["decision"]), verdict.get("reasoning", ""))
+                elif pf.open_count() >= config.MAX_OPEN_POSITIONS:
+                    events.append(f"{r['name']} → {tk}: accepted, but at max open positions — not bought.")
+                    trends.record_stock(trend, rec, "watch", verdict.get("reasoning", ""))
+                else:
+                    price = elig["price"] or market.last_price(tk)
+                    if price and pf.buy(tk, rec.get("name", tk), r["name"], rec.get("thesis", ""), price, config.INITIAL_POSITION):
+                        p = pf.position(tk); p["verdict"] = verdict; p["trend"] = trend_text
+                        events.append(f"BOUGHT {tk} @ ${price:.2f} (${config.INITIAL_POSITION:,.0f}) — {r['judge']}: {verdict.get('reasoning','')[:160]}")
+                        trends.record_stock(trend, rec, "bought", verdict.get("reasoning", ""))
+                    else:
+                        events.append(f"{r['name']} → {tk}: accepted, but no price available — not bought.")
+                        trends.record_stock(trend, rec, "watch", verdict.get("reasoning", ""))
 
     # ---- mark, report, save ----
     for tk in pf.held_tickers():

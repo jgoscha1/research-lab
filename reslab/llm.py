@@ -82,29 +82,50 @@ def _json(text: str | None):
 # --------------------------------------------------------------------------- #
 RESEARCH_PROMPT = """You are {name}, a buy-side equity researcher. Your style: {style}
 
-Using web search for current information, find ONE fresh US-listed stock to \
-recommend today — any market cap, from small-cap to mega-cap. Hard constraints:
+Using web search for current information, identify ONE fresh macro or industry \
+trend, then find 1 to 3 specific US-listed stocks that would genuinely benefit \
+from it — any market cap, from small-cap to mega-cap. Hard constraints on every pick:
 - It must be buyable on Robinhood: listed on a MAJOR US exchange (Nasdaq, NYSE, \
 or NYSE American). NO OTC / pink-sheet stocks.
 - It must have real revenue, backlog, contracts, or a concrete policy/structural \
-moat — NOT a pre-revenue story stock.
-- Do not recommend any of these already-held names: {avoid}.
-
-Identify a macro/industry driver, then a specific beneficiary, and honestly \
-assess whether the idea is already priced in.
+moat tied to the trend — NOT a pre-revenue story stock.
+- Only include a pick you can honestly defend as not already fully priced in.
+- Do not recommend any of these already-seen names: {avoid}.
 
 Respond ONLY as JSON:
-{{"ticker":"...","name":"...","driver":"one sentence macro driver",
-"thesis":"2-3 sentence company thesis","valuation":"cheap|fair|rich + one line why",
-"catalyst":"what could re-rate it","risks":"the main risks","conviction":"low|medium|high"}}"""
+{{"trend":"one clear sentence naming the trend and why it matters now",
+"picks":[
+ {{"ticker":"...","name":"...","thesis":"2-3 sentence case tying this company to the trend",
+  "valuation":"cheap|fair|rich + one line why","catalyst":"what could re-rate it",
+  "risks":"the main risks","conviction":"low|medium|high"}}
+]}}"""
+
+STOCK_IN_TREND_PROMPT = """You are {name}, a buy-side equity researcher. Your style: {style}
+
+The owner wants your honest take on one specific stock as a play on this trend: \
+"{trend}"
+
+Stock: {ticker}
+
+Using web search for current, real information on {ticker}: does the trend \
+driver actually apply to this company, is there real revenue/backlog/moat tied \
+to it, and is the valuation defensible? If the link is weak or the fundamentals \
+don't support it, say so plainly rather than forcing a bull case.
+
+Respond ONLY as JSON:
+{{"ticker":"{ticker}","name":"company name","thesis":"2-3 sentence case, or why it \
+doesn't fit the trend","valuation":"cheap|fair|rich + one line why",
+"catalyst":"what could re-rate it (or 'none' if the case is weak)",
+"risks":"the main risks","conviction":"low|medium|high"}}"""
 
 JUDGE_NEW_PROMPT = """You are {judge}, a rigorous, skeptical gatekeeper who cannot be \
-argued past the evidence. Researcher {name} proposes this stock:
+argued past the evidence. Researcher {name} proposes this stock as a beneficiary of \
+a trend they identified:
 {rec}
 
-Using web search to verify, interrogate it: is the thesis sound, is it ALREADY \
-priced in, is there real revenue/evidence (reject pure story stocks), and is the \
-valuation defensible? Decide honestly.
+Using web search to verify, interrogate it: does it genuinely tie to the trend, is \
+the thesis sound, is it ALREADY priced in, is there real revenue/evidence (reject \
+pure story stocks), and is the valuation defensible? Decide honestly.
 
 Respond ONLY as JSON:
 {{"decision":"accept|watch|reject","priced_in":true|false,
@@ -123,25 +144,46 @@ Respond ONLY as JSON:
 {{"action":"hold|add|sell","reasoning":"2-3 sentences, first person, what changed"}}"""
 
 
-def research(researcher: dict, avoid: list[str]) -> dict | None:
+def research(researcher: dict, avoid: list[str], trend_focus: str | None = None) -> dict:
+    """Find a trend and 1-3 stocks that benefit from it.
+
+    Returns {"trend": str, "picks": [rec, ...]}; picks is empty (with
+    "_offline": True) if the API key/package is missing or the call failed.
+    trend_focus, when given, steers the researcher toward that specific trend
+    instead of letting them pick their own (used for owner-suggested trends).
+    """
+    style = researcher["style"]
+    if trend_focus:
+        style += f" Focus specifically on this trend the owner flagged: {trend_focus}"
     txt = _ask(RESEARCH_PROMPT.format(
+        name=researcher["name"], style=style, avoid=", ".join(avoid) or "none"))
+    data = _json(txt)
+    picks = (data or {}).get("picks") or []
+    if not picks:
+        return {"trend": trend_focus or (data or {}).get("trend", ""), "picks": [], "_offline": True}
+    for p in picks:
+        p["by"] = researcher["name"]
+    return {"trend": data.get("trend") or trend_focus or "", "picks": picks}
+
+
+def research_stock(researcher: dict, ticker: str, trend: str) -> dict | None:
+    """Build (or debunk) the case for one owner-suggested stock under a given trend."""
+    txt = _ask(STOCK_IN_TREND_PROMPT.format(
         name=researcher["name"], style=researcher["style"],
-        avoid=", ".join(avoid) or "none"))
+        ticker=ticker.upper(), trend=trend))
     rec = _json(txt)
     if rec is None:
-        return {"ticker": "STUB", "name": "(offline stub)", "driver": "n/a",
-                "thesis": "Set ANTHROPIC_API_KEY to enable live research.",
-                "valuation": "n/a", "catalyst": "n/a", "risks": "n/a",
-                "conviction": "low", "_offline": True}
+        return None
     rec["by"] = researcher["name"]
     return rec
 
 
-def judge_new(researcher: dict, rec: dict) -> dict:
+def judge_new(researcher: dict, rec: dict, trend: str | None = None) -> dict:
+    payload = {k: rec.get(k) for k in ("ticker", "name", "thesis", "valuation", "catalyst", "risks")}
+    if trend:
+        payload["trend"] = trend
     txt = _ask(JUDGE_NEW_PROMPT.format(
-        judge=researcher["judge"], name=researcher["name"],
-        rec=json.dumps({k: rec.get(k) for k in
-                        ("ticker", "name", "driver", "thesis", "valuation", "catalyst", "risks")})))
+        judge=researcher["judge"], name=researcher["name"], rec=json.dumps(payload)))
     v = _json(txt)
     if v is None:
         return {"decision": "reject", "priced_in": None,

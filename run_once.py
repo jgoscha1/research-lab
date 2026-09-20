@@ -19,19 +19,24 @@ def main():
     if not config.ANTHROPIC_API_KEY:
         print("Set ANTHROPIC_API_KEY to run live research. (Offline: nothing to show.)")
         return
-    print(f"[{r['name']} / {r['judge']}] researching a Robinhood-buyable stock…\n")
-    rec = llm.research(r, avoid=[])
-    print("RECOMMENDATION:", rec.get("ticker"), "-", rec.get("name"))
-    for k in ("driver", "thesis", "valuation", "catalyst", "risks", "conviction"):
-        print(f"  {k}: {rec.get(k)}")
-    tk = (rec.get("ticker") or "").upper()
-    elig = market.eligibility(tk)
-    print(f"\nELIGIBILITY: tradeable={elig['tradeable']} exchange={elig['exchange']} "
-          f"cap={elig['market_cap']} price={elig['price']} {elig['reasons']}")
-    if elig["tradeable"]:
-        v = llm.judge_new(r, rec)
-        print(f"\n{r['judge'].upper()}: {v['decision']} (priced_in={v.get('priced_in')})")
-        print(f"  {v.get('reasoning')}")
+    print(f"[{r['name']} / {r['judge']}] researching a trend and its beneficiaries…\n")
+    result = llm.research(r, avoid=[])
+    if result.get("_offline") or not result["picks"]:
+        print("Live research unavailable (no picks came back).")
+        return
+    print("TREND:", result["trend"])
+    for rec in result["picks"]:
+        print(f"\nPICK: {rec.get('ticker')} - {rec.get('name')}")
+        for k in ("thesis", "valuation", "catalyst", "risks", "conviction"):
+            print(f"  {k}: {rec.get(k)}")
+        tk = (rec.get("ticker") or "").upper()
+        elig = market.eligibility(tk)
+        print(f"  ELIGIBILITY: tradeable={elig['tradeable']} exchange={elig['exchange']} "
+              f"cap={elig['market_cap']} price={elig['price']} {elig['reasons']}")
+        if elig["tradeable"]:
+            v = llm.judge_new(r, rec, trend=result["trend"])
+            print(f"  {r['judge'].upper()}: {v['decision']} (priced_in={v.get('priced_in')})")
+            print(f"    {v.get('reasoning')}")
 
 
 if __name__ == "__main__":

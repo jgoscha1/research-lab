@@ -24,8 +24,8 @@ from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from reslab import config, market, llm, store        # noqa
-from reslab.portfolio import Portfolio               # noqa
+from reslab import config, market, llm, store, trends  # noqa
+from reslab.portfolio import Portfolio                 # noqa
 
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 INTERVAL = int(os.environ.get("RUN_INTERVAL_SEC", "90"))
@@ -74,7 +74,41 @@ def _state():
     st = store.load()
     st.setdefault("portfolio", {})
     st.setdefault("researchers", {})
+    st.setdefault("trends", [])
     return st
+
+
+STATUS_MAP = {"reject": "rejected", "watch": "watch"}  # judge decision -> trend-stock status
+
+
+def _judge_and_place(st, pf, r, rec, trend_text, trend, bought_note=""):
+    """Judge one pick, buy/skip it, log the outcome, and record it on the trend.
+    Returns True if bought."""
+    tk = (rec.get("ticker") or "").upper()
+    elig = market.eligibility(tk)
+    if not elig["tradeable"]:
+        log("s", r["name"], f"{tk}: skipped — not Robinhood-buyable ({', '.join(elig['reasons'])}).", "sys")
+        trends.record_stock(trend, rec, "not_tradeable")
+        return False
+    verdict = llm.judge_new(r, rec, trend=trend_text)
+    log("j", r["name"], f"{r['judge']}: {verdict.get('reasoning','')}", "verdict")
+    if verdict["decision"] != "accept":
+        log("s", r["name"], f"{tk}: {verdict['decision']} — not bought.", "sys")
+        trends.record_stock(trend, rec, STATUS_MAP.get(verdict["decision"], verdict["decision"]), verdict.get("reasoning", ""))
+        return False
+    if pf.open_count() >= config.MAX_OPEN_POSITIONS:
+        log("s", r["name"], f"{tk}: accepted, but at max open positions — not bought.", "sys")
+        trends.record_stock(trend, rec, "watch", verdict.get("reasoning", ""))
+        return False
+    px = elig["price"] or price(tk)
+    if px and pf.buy(tk, rec.get("name", tk), r["name"], rec.get("thesis", ""), px, config.INITIAL_POSITION):
+        p = pf.position(tk); p["rec"] = rec; p["verdict"] = verdict; p["trend"] = trend_text
+        log("s", r["name"], f"BOUGHT {tk} @ ${px:.2f} (${config.INITIAL_POSITION:,.0f}){bought_note}.", "sys")
+        trends.record_stock(trend, rec, "bought", verdict.get("reasoning", ""))
+        return True
+    log("s", r["name"], f"{tk}: accepted, but no price available — not bought.", "sys")
+    trends.record_stock(trend, rec, "watch", verdict.get("reasoning", ""))
+    return False
 
 
 def one_cycle(cyc):
@@ -111,27 +145,22 @@ def one_cycle(cyc):
         else:
             rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
             avoid = pf.held_tickers() + rstate["proposed"][-40:]
-            rec = llm.research(r, avoid)
-            if not rec or rec.get("_offline"):
+            result = llm.research(r, avoid)
+            if result.get("_offline"):
                 log("s", r["name"], "Live research unavailable (set ANTHROPIC_API_KEY).", "sys")
                 store.save(st); return
-            tk = (rec.get("ticker") or "").upper()
-            if tk and tk not in avoid:
-                rstate["proposed"].append(tk)
+            trend_text = result["trend"]
+            trend = trends.get_or_create(st, r["name"], trend_text, origin="auto")
+            log("r", r["name"], f"Trend: {trend_text}")
+            for rec in result["picks"][:3]:
+                tk = (rec.get("ticker") or "").upper()
+                if not tk or tk in avoid:
+                    continue
+                rstate["proposed"].append(tk); avoid.append(tk)
                 log("r", r["name"], f"{tk} — {rec.get('thesis','')}")
-                elig = market.eligibility(tk)
-                if not elig["tradeable"]:
-                    log("s", r["name"], f"{tk}: skipped — not Robinhood-buyable ({', '.join(elig['reasons'])}).", "sys")
-                else:
-                    verdict = llm.judge_new(r, rec)
-                    log("j", r["name"], f"{r['judge']}: {verdict.get('reasoning','')}", "verdict")
-                    if verdict["decision"] == "accept":
-                        px = elig["price"] or price(tk)
-                        if px and pf.buy(tk, rec.get("name", tk), r["name"], rec.get("thesis", ""), px, config.INITIAL_POSITION):
-                            p = pf.position(tk); p["rec"] = rec; p["verdict"] = verdict
-                            log("s", r["name"], f"BOUGHT {tk} @ ${px:.2f} (${config.INITIAL_POSITION:,.0f}).", "sys")
-                    else:
-                        log("s", r["name"], f"{tk}: {verdict['decision']} — not bought.", "sys")
+                _judge_and_place(st, pf, r, rec, trend_text, trend)
+                if pf.open_count() >= config.MAX_OPEN_POSITIONS:
+                    break
 
     prices = {t: price(t) for t in pf.held_tickers()}
     prices = {t: p for t, p in prices.items() if p}
@@ -189,6 +218,7 @@ def state_json():
             "legs": p["legs"], "challenges": p.get("challenges", {}),
             "last_challenge": p.get("last_challenge"), "rec": p.get("rec"),
             "verdict": p.get("verdict"), "thesis": p.get("thesis", ""),
+            "trend": p.get("trend", ""),
         })
     cash = pf.s.get("cash", 0.0); curve = pf.s.get("curve", [])
     def pct(key=None):
@@ -217,6 +247,7 @@ def state_json():
         "researchers": [{"name": r["name"], "judge": r["judge"]} for r in config.RESEARCHERS],
         "costs": {"today": costs.get("daily", {}).get(str(date.today()), 0.0),
                   "total": costs.get("total", 0.0)},
+        "trends": list(reversed(st.get("trends", [])))[-60:],
     }
 
 
@@ -243,35 +274,81 @@ def ask_book(q):
     return txt or "Live AI unavailable \u2014 check ANTHROPIC_API_KEY."
 
 
-def research_trend(trend, rname):
+def research_trend(trend_text, rname):
+    """Owner-suggested trend: find up to 3 stocks for it, judge and place each."""
     r = next((x for x in config.RESEARCHERS if x["name"].lower() == rname.lower()), config.RESEARCHERS[0])
     st = _state(); pf = Portfolio(st["portfolio"])
-    rec = llm.research({**r, "style": r["style"] + f" Focus specifically on this trend the owner flagged: {trend}."},
-                       pf.held_tickers())
-    if not rec or rec.get("_offline"):
-        log("s", r["name"], f"Your trend '{trend}': live research unavailable.", "sys")
+    rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
+    avoid = pf.held_tickers() + rstate["proposed"][-40:]
+    result = llm.research(r, avoid, trend_focus=trend_text)
+    if result.get("_offline"):
+        log("s", r["name"], f"Your trend '{trend_text}': live research unavailable.", "sys")
         return "Live AI unavailable."
-    tk = (rec.get("ticker") or "").upper()
-    log("r", r["name"], f"[your trend: {trend}] {tk} \u2014 {rec.get('thesis','')}")
-    elig = market.eligibility(tk)
-    if not elig["tradeable"]:
-        log("s", r["name"], f"{tk}: not Robinhood-buyable ({', '.join(elig['reasons'])}).", "sys")
-        return f"{tk}: not Robinhood-buyable."
-    verdict = llm.judge_new(r, rec)
-    log("j", r["name"], f"{r['judge']}: {verdict.get('reasoning','')}", "verdict")
-    if verdict["decision"] != "accept":
-        log("s", r["name"], f"{tk}: {verdict['decision']} — not bought.", "sys")
-    elif pf.open_count() >= config.MAX_OPEN_POSITIONS:
-        log("s", r["name"], f"{tk}: accepted, but at max open positions — not bought.", "sys")
-    else:
-        px = elig["price"] or price(tk)
-        if px and pf.buy(tk, rec.get("name", tk), r["name"], rec.get("thesis", ""), px, config.INITIAL_POSITION):
-            p = pf.position(tk); p["rec"] = rec; p["verdict"] = verdict
-            log("s", r["name"], f"BOUGHT {tk} @ ${px:.2f} from your trend.", "sys")
-            store.save(st)
-        else:
-            log("s", r["name"], f"{tk}: accepted, but no price available — not bought.", "sys")
-    return f"{tk}: {verdict['decision']}."
+    trend = trends.get_or_create(st, r["name"], trend_text, origin="owner")
+    picks = [p for p in result["picks"] if (p.get("ticker") or "").upper() not in avoid][:3]
+    if not picks:
+        log("s", r["name"], f"Your trend '{trend_text}': nothing new to report.", "sys")
+        store.save(st)
+        return "No new picks \u2014 try a more specific trend."
+    bought = []
+    for rec in picks:
+        tk = (rec.get("ticker") or "").upper()
+        rstate["proposed"].append(tk); avoid.append(tk)
+        log("r", r["name"], f"[your trend: {trend_text}] {tk} \u2014 {rec.get('thesis','')}")
+        if _judge_and_place(st, pf, r, rec, trend_text, trend, bought_note=" from your trend"):
+            bought.append(tk)
+    store.save(st)
+    return f"{len(picks)} pick(s) reviewed" + (f", bought {', '.join(bought)}" if bought else "") + "."
+
+
+def expand_trend(trend_id):
+    """Find more stocks in a trend already on file — the 'find others' button."""
+    st = _state(); pf = Portfolio(st["portfolio"])
+    trend = trends.get_by_id(st, trend_id)
+    if trend is None:
+        return "Trend not found."
+    r = next((x for x in config.RESEARCHERS if x["name"] == trend["researcher"]), config.RESEARCHERS[0])
+    rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
+    avoid = pf.held_tickers() + rstate["proposed"][-40:] + trends.seen_tickers(trend)
+    result = llm.research(r, avoid, trend_focus=trend["text"])
+    if result.get("_offline"):
+        log("s", r["name"], f"Your trend '{trend['text']}': live research unavailable.", "sys")
+        return "Live AI unavailable."
+    picks = [p for p in result["picks"] if (p.get("ticker") or "").upper() not in avoid][:3]
+    if not picks:
+        log("s", r["name"], f"'{trend['text']}': no new names to add right now.", "sys")
+        return "No new picks in this trend right now."
+    bought = []
+    for rec in picks:
+        tk = (rec.get("ticker") or "").upper()
+        rstate["proposed"].append(tk); avoid.append(tk)
+        log("r", r["name"], f"[more on: {trend['text']}] {tk} — {rec.get('thesis','')}")
+        if _judge_and_place(st, pf, r, rec, trend["text"], trend, bought_note=" from this trend"):
+            bought.append(tk)
+    store.save(st)
+    return f"{len(picks)} new pick(s) reviewed" + (f", bought {', '.join(bought)}" if bought else "") + "."
+
+
+def analyze_trend_stock(trend_id, ticker):
+    """Owner points at a specific ticker to analyze under an existing trend."""
+    st = _state(); pf = Portfolio(st["portfolio"])
+    trend = trends.get_by_id(st, trend_id)
+    if trend is None:
+        return "Trend not found."
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return "Enter a ticker."
+    r = next((x for x in config.RESEARCHERS if x["name"] == trend["researcher"]), config.RESEARCHERS[0])
+    rec = llm.research_stock(r, ticker, trend["text"])
+    if rec is None:
+        log("s", r["name"], f"{ticker}: live research unavailable.", "sys")
+        return "Live AI unavailable."
+    log("r", r["name"], f"[your pick for: {trend['text']}] {ticker} — {rec.get('thesis','')}")
+    rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
+    rstate["proposed"].append(ticker)
+    bought = _judge_and_place(st, pf, r, rec, trend["text"], trend, bought_note=" from your pick")
+    store.save(st)
+    return f"{ticker}: reviewed" + (", bought" if bought else "") + "."
 
 
 def system_review():
@@ -354,6 +431,8 @@ class H(BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(ln) or "{}")
         if rp == "/api/ask": return self._send(200, json.dumps({"answer": ask_book(data.get("q", ""))}))
         if rp == "/api/trend": return self._send(200, json.dumps({"result": research_trend(data.get("trend", ""), data.get("researcher", "Ada"))}))
+        if rp == "/api/trend/expand": return self._send(200, json.dumps({"result": expand_trend(data.get("trend_id"))}))
+        if rp == "/api/trend/stock": return self._send(200, json.dumps({"result": analyze_trend_stock(data.get("trend_id"), data.get("ticker", ""))}))
         if rp == "/api/review": return self._send(200, json.dumps({"review": system_review()}))
         return self._send(404, "not found", "text/plain")
 
@@ -412,9 +491,13 @@ h4{font-size:11px;text-transform:uppercase;color:var(--mut);margin:13px 0 3px} s
 <div class='card'><h3>Open positions</h3><div id='positions'></div></div>
 <div class='card'><h3>Closed positions</h3><div id='closed'></div></div>
 
+<div class='card'><h3>Trends</h3><p class='mut' style='margin-top:0'>Every macro/industry trend a researcher has looked at, and each stock reviewed within it. Click one to expand.</p>
+<div id='trends'></div></div>
+
 <div class='card'><h3>Ask the lab</h3><input id='askin' placeholder='e.g. which holding is up the most, and why?'>
 <button class='mini' onclick='ask()'>Ask</button><div id='askout' class='mut' style='margin-top:8px'></div></div>
-<div class='card'><h3>Suggest a trend</h3><input id='trendin' placeholder='e.g. undersea cables, water scarcity\u2026'>
+<div class='card'><h3>Suggest a trend</h3><p class='mut' style='margin-top:0'>The researcher will find 1-3 stocks that benefit from it.</p>
+<input id='trendin' placeholder='e.g. undersea cables, water scarcity\u2026'>
 <button class='mini' onclick='trend("Ada")'>Send to Ada</button> <button class='mini' onclick='trend("Boone")'>Send to Boone</button>
 <div id='trendout' class='mut' style='margin-top:8px'></div></div>
 <div class='card'><h3>System review</h3><p class='mut' style='margin-top:0'>Ask a fresh agent to audit this whole setup — sizing, cadence, diversification — for ways to improve returns.</p>
@@ -468,9 +551,45 @@ function render(s){const r=s.run;
  }).join(''):"<span class='mut'>No open positions yet \u2014 press Go and watch them appear.</span>";
  $('closed').innerHTML=s.closed.length?"<table>"+s.closed.slice().reverse().map(c=>
    "<tr><td><b>"+c.tk+"</b> <span class='mut'>"+c.by+"</span></td><td class='"+(c.pnl>=0?'up':'dn')+"'>"+pc(c.pnl_pct)+" ($"+Math.round(c.pnl).toLocaleString()+")</td><td class='mut'>"+(c.sell_reason||'').slice(0,90)+"</td></tr>").join('')+"</table>":"<span class='mut'>none yet</span>";
+ renderTrends(s.trends);
 }
+let TRENDS_OPEN=new Set(), TREND_MSG={};
+function statusBadge(st){const map={bought:['up','bought'],watch:['mut','watching'],rejected:['dn','rejected'],not_tradeable:['mut','not tradeable']};
+ const pair=map[st]||['mut',st]; return "<span class='"+pair[0]+"' style='font-size:11px'>"+pair[1]+"</span>";}
+function renderTrends(list){const el=$('trends'); if(!list){return;}
+ if(!list.length){el.innerHTML="<span class='mut'>No trends explored yet — press Go, or suggest one above.</span>";return;}
+ el.innerHTML=list.map(t=>{
+   const open=TRENDS_OPEN.has(t.id);
+   const counts={}; (t.stocks||[]).forEach(s=>counts[s.status]=(counts[s.status]||0)+1);
+   const summary=Object.entries(counts).map(([k,v])=>v+' '+k).join(', ')||'no stocks yet';
+   const stocksHtml=(t.stocks||[]).length?(t.stocks||[]).map(s=>
+     "<div class='pos'><b>"+s.tk+"</b> "+statusBadge(s.status)+" <span class='mut'>"+(s.name||'')+"</span>"+
+     (s.thesis?"<div class='mut' style='margin-top:4px'>"+s.thesis+"</div>":"")+
+     (s.reasoning?"<div class='mut' style='margin-top:4px'>⚖︎ "+s.reasoning+"</div>":"")+
+     "</div>").join(''):"<span class='mut'>no stocks yet</span>";
+   return "<div class='pos' style='margin-bottom:8px'>"+
+     "<div style='cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:8px' onclick='toggleTrend("+t.id+")'>"+
+       "<div><b>"+t.text+"</b><div class='mut' style='margin-top:2px'>"+t.researcher+" · "+t.origin+" · "+summary+"</div></div>"+
+       "<span class='chev"+(open?'':' collapsed')+"'>▼</span></div>"+
+     (open?("<div style='margin-top:8px'>"+stocksHtml+
+       "<div style='margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center'>"+
+         "<button class='mini' onclick='event.stopPropagation();findOthers("+t.id+")'>find others ▸</button>"+
+         "<input id='ti_"+t.id+"' placeholder='suggest a ticker, e.g. NVDA' style='flex:1;min-width:140px;margin:0' onclick='event.stopPropagation()'>"+
+         "<button class='mini' onclick='event.stopPropagation();suggestStock("+t.id+")'>analyze ▸</button></div>"+
+       "<div class='mut' style='margin-top:6px'>"+(TREND_MSG[t.id]||'')+"</div></div>"):"")+
+     "</div>";
+ }).join('');
+}
+function toggleTrend(id){if(TRENDS_OPEN.has(id))TRENDS_OPEN.delete(id);else TRENDS_OPEN.add(id); renderTrends(STATE&&STATE.trends);}
+async function findOthers(id){TREND_MSG[id]='looking for more… this can take a bit (live web research)…';renderTrends(STATE.trends);
+ const r=await (await fetch(BASE+'/api/trend/expand',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trend_id:id})})).json();
+ TREND_MSG[id]=r.result+' (see the conversation feed)'; renderTrends(STATE.trends);}
+async function suggestStock(id){const inp=$('ti_'+id); const tk=inp?inp.value.trim():''; if(!tk)return;
+ TREND_MSG[id]='analyzing '+tk+'…'; renderTrends(STATE.trends);
+ const r=await (await fetch(BASE+'/api/trend/stock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trend_id:id,ticker:tk})})).json();
+ TREND_MSG[id]=r.result+' (see the conversation feed)'; renderTrends(STATE.trends);}
 function rep(i){const x=STATE.positions[i];const r=x.rec||{};const v=x.verdict||{};
- open2("<h3>"+x.tk+" \u00b7 "+x.name+"</h3>"+(r.driver?"<h4>Driver</h4><p>"+r.driver+"</p>":"")+
+ open2("<h3>"+x.tk+" \u00b7 "+x.name+"</h3>"+(x.trend?"<h4>Trend</h4><p>"+x.trend+"</p>":"")+
   "<h4>Thesis</h4><p>"+(r.thesis||x.thesis||'')+"</p>"+(r.valuation?"<h4>Valuation</h4><p>"+r.valuation+"</p>":"")+
   (r.catalyst?"<h4>Catalyst</h4><p>"+r.catalyst+"</p>":"")+(r.risks?"<h4>Risks</h4><p>"+r.risks+"</p>":"")+
   "<h4>\u2696\ufe0e Judge</h4><p>"+(v.reasoning||'')+"</p><p class='mut' style='margin-top:12px'>Not investment advice.</p>");}
