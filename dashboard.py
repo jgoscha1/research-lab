@@ -1,10 +1,11 @@
 """dashboard.py — the live Research Lab app you control from a browser.
 
 A private URL (no login — the address itself is the secret). Press Go and the
-two researchers run continuously (each cycle: research a Robinhood-buyable small
-cap, its Judge interrogates, buy/hold/add/sell), streaming their conversation
-live. Stop anytime, or it auto-stops after 6 hours. Shows the real portfolio,
-positions, P&L vs SPY/IWM, price charts, 1-page reports, and closed trades.
+two researchers run continuously (each cycle: research a Robinhood-buyable stock
+of any size, or — once per day per holding — its Judge reviews an existing
+position for buy-more/hold/sell), streaming their conversation live. Stop
+anytime, or it auto-stops after 6 hours. Shows the real portfolio, positions,
+P&L vs SPY/IWM, price charts, 1-page reports, closed trades, and AI spend.
 
 Continuous running spends your Anthropic credit — watch the cycle counter and
 rely on your Console spend cap. Paper only; no real orders.
@@ -80,16 +81,20 @@ def one_cycle(cyc):
     st = _state()
     pf = Portfolio(st["portfolio"])
     r = config.RESEARCHERS[cyc % len(config.RESEARCHERS)]
+    today = str(date.today())
     holds = [t for t, p in pf.s["positions"].items() if p["researcher"] == r["name"]]
+    # Each holding gets at most one buy/hold/sell review per day — once a
+    # position has been reviewed today, leave it alone until tomorrow.
+    due = [t for t in holds if pf.position(t).get("last_challenge", {}).get("date") != today]
 
-    if cyc % 4 == 3 and holds:
-        tk = holds[cyc % len(holds)]
+    if due:
+        tk = due[0]
         pos = pf.position(tk); px = price(tk)
         v = pf.value_position(tk, px) or {"value": pos["cost_basis"], "pnl_pct": 0}
         log("r", r["name"], f"Reviewing {tk} — ${v['value']:,.0f} ({v['pnl_pct']:+.1f}%).")
         d = llm.judge_hold(r, pos, v["value"], v["pnl_pct"])
         pos["challenges"]["total"] += 1
-        pos["last_challenge"] = {"date": str(date.today()), "action": d["action"], "reasoning": d.get("reasoning", "")}
+        pos["last_challenge"] = {"date": today, "action": d["action"], "reasoning": d.get("reasoning", "")}
         log("j", r["name"], f"{r['judge']}: {d.get('reasoning','')}", "verdict")
         if d["action"] == "sell":
             rec = pf.sell(tk, px, d.get("reasoning", "sell"))
@@ -116,7 +121,7 @@ def one_cycle(cyc):
                 log("r", r["name"], f"{tk} — {rec.get('thesis','')}")
                 elig = market.eligibility(tk)
                 if not elig["tradeable"]:
-                    log("s", r["name"], f"{tk}: skipped — not Robinhood small-cap ({', '.join(elig['reasons'])}).", "sys")
+                    log("s", r["name"], f"{tk}: skipped — not Robinhood-buyable ({', '.join(elig['reasons'])}).", "sys")
                 else:
                     verdict = llm.judge_new(r, rec)
                     log("j", r["name"], f"{r['judge']}: {verdict.get('reasoning','')}", "verdict")
@@ -195,6 +200,7 @@ def state_json():
             a, b = pts[0], pts[-1]
         return (b / a - 1) * 100 if a else None
     remaining = max(0, RUN["until"] - time.time()) if RUN["running"] else 0
+    costs = store.load_costs()
     return {
         "run": {"running": RUN["running"], "cycles": RUN["cycles"],
                 "elapsed": int(time.time() - RUN["started"]) if RUN["started"] else 0,
@@ -208,6 +214,9 @@ def state_json():
                     "pnl": c["pnl"], "pnl_pct": c["pnl_pct"], "sell_reason": c.get("sell_reason", "")}
                    for c in pf.s.get("closed", [])[-20:]],
         "events": EVENTS[-400:],
+        "researchers": [{"name": r["name"], "judge": r["judge"]} for r in config.RESEARCHERS],
+        "costs": {"today": costs.get("daily", {}).get(str(date.today()), 0.0),
+                  "total": costs.get("total", 0.0)},
     }
 
 
@@ -246,8 +255,8 @@ def research_trend(trend, rname):
     log("r", r["name"], f"[your trend: {trend}] {tk} \u2014 {rec.get('thesis','')}")
     elig = market.eligibility(tk)
     if not elig["tradeable"]:
-        log("s", r["name"], f"{tk}: not Robinhood small-cap ({', '.join(elig['reasons'])}).", "sys")
-        return f"{tk}: not a Robinhood-buyable small cap."
+        log("s", r["name"], f"{tk}: not Robinhood-buyable ({', '.join(elig['reasons'])}).", "sys")
+        return f"{tk}: not Robinhood-buyable."
     verdict = llm.judge_new(r, rec)
     log("j", r["name"], f"{r['judge']}: {verdict.get('reasoning','')}", "verdict")
     if verdict["decision"] == "accept" and pf.open_count() < config.MAX_OPEN_POSITIONS:
@@ -257,6 +266,54 @@ def research_trend(trend, rname):
             log("s", r["name"], f"BOUGHT {tk} @ ${px:.2f} from your trend.", "sys")
             store.save(st)
     return f"{tk}: {verdict['decision']}."
+
+
+def system_review():
+    """Ask a fresh Claude call to audit this whole setup and suggest changes
+    that could improve risk-adjusted returns — not just the current holdings."""
+    st = _state(); pf = Portfolio(st["portfolio"])
+    curve = pf.s.get("curve", [])
+    def pct(key=None):
+        if not curve: return None
+        if key is None: a, b = curve[0]["value"], curve[-1]["value"]
+        else:
+            pts = [c["benchmarks"].get(key) for c in curve if c["benchmarks"].get(key)]
+            if not pts: return None
+            a, b = pts[0], pts[-1]
+        return (b / a - 1) * 100 if a else None
+    closed = pf.s.get("closed", [])
+    wins = sum(1 for c in closed if c["pnl"] >= 0)
+    bench = ", ".join(f"{b} {(pct(b) or 0):+.1f}%" for b in config.BENCHMARKS)
+    holds = "; ".join(f"{tk} {p.get('researcher')} {p['challenges'].get('total',0)}x reviewed"
+                       for tk, p in pf.s["positions"].items()) or "none"
+    trades = "; ".join(f"{c['ticker']} {c['pnl_pct']:+.1f}% ({(c.get('sell_reason') or '')[:80]})"
+                        for c in closed[-15:]) or "none yet"
+    summary = (
+        f"Total value ${pf.s.get('cash',0)+pf.invested_total():,.0f} "
+        f"({(pct() or 0):+.1f}% since inception vs {bench}). "
+        f"{pf.open_count()} open positions, {len(closed)} closed ({wins}/{len(closed)} profitable).\n"
+        f"Config: initial position ${config.INITIAL_POSITION:,.0f}, add size ${config.ADD_SIZE:,.0f}, "
+        f"max position ${config.MAX_POSITION:,.0f}, max open positions {config.MAX_OPEN_POSITIONS}, "
+        f"cash budget ${config.CASH_BUDGET:,.0f}, each holding reviewed at most once/day.\n"
+        f"Researchers: " + "; ".join(f"{r['name']} ({r['judge']}): {r['style']}" for r in config.RESEARCHERS) + "\n"
+        f"Open positions: {holds}\nRecent closed trades: {trades}"
+    )
+    prompt = (
+        "You are an outside quant/portfolio-strategy consultant auditing this automated "
+        "paper-trading research system (two LLM researchers, each with a skeptical LLM judge, "
+        "picking Robinhood-buyable US stocks of any market cap). Here is its current state:\n\n"
+        + summary +
+        "\n\nGive concrete, prioritized suggestions to improve risk-adjusted returns going "
+        "forward: sizing/diversification, review cadence, what in this exact setup is "
+        "structurally likely helping or hurting, and specific parameter changes worth trying. "
+        "Be honest if the sample size is too small to conclude much yet. Not investment advice."
+    )
+    log("s", "", "\U0001f50d System review requested…", "sys")
+    txt = llm._ask(prompt, max_tokens=2000)
+    if not txt:
+        return "Live AI unavailable — check ANTHROPIC_API_KEY."
+    log("s", "", "\U0001f50d System review ready — see the button output.", "sys")
+    return txt
 
 
 class H(BaseHTTPRequestHandler):
@@ -291,6 +348,7 @@ class H(BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(ln) or "{}")
         if rp == "/api/ask": return self._send(200, json.dumps({"answer": ask_book(data.get("q", ""))}))
         if rp == "/api/trend": return self._send(200, json.dumps({"result": research_trend(data.get("trend", ""), data.get("researcher", "Ada"))}))
+        if rp == "/api/review": return self._send(200, json.dumps({"review": system_review()}))
         return self._send(404, "not found", "text/plain")
 
     def log_message(self, *a):
@@ -316,6 +374,8 @@ button:hover{border-color:var(--mut)} .go{background:var(--up);color:#06210f;bor
 .feed.collapsed{display:none}
 .card-head{display:flex;align-items:center;justify-content:space-between;cursor:pointer;gap:8px}
 .card-head h3{margin:0} .chev{color:var(--mut);font-size:11px;transition:transform .15s} .chev.collapsed{transform:rotate(-90deg)}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.tab{font-size:11px;padding:4px 10px;opacity:.55} .tab.active{opacity:1;border-color:var(--mut);background:#1c2029}
 .m{max-width:90%;padding:7px 10px;border-radius:11px;font-size:13px;white-space:pre-wrap}
 .m.r{align-self:flex-start;background:#12203a} .m.j{align-self:flex-end;background:#2a2010} .m.s{align-self:center;color:var(--mut);font-size:12px;background:transparent}
 .who{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--mut);margin-bottom:2px}
@@ -338,9 +398,11 @@ h4{font-size:11px;text-transform:uppercase;color:var(--mut);margin:13px 0 3px} s
 <span class='stat'><span class='mut'>Invested</span><br><span class='big' id='p_inv'>\u2014</span></span>
 <span class='stat'><span class='mut'>Cash</span><br><span class='big' id='p_cash'>\u2014</span></span>
 <span class='stat'><span class='mut'>vs market</span><br><span class='big' id='p_pct'>\u2014</span></span>
+<span class='stat'><span class='mut'>AI cost today</span><br><span class='big' id='p_cost'>\u2014</span></span>
 <div class='mut' id='p_bench' style='margin-top:6px'></div><div id='chart'></div></div>
 
-<div class='card'><div class='card-head' onclick='toggleFeed()'><h3>Live conversation</h3><span class='chev' id='feedChev'>▼</span></div><div class='feed' id='feed'></div></div>
+<div class='card'><div class='card-head' onclick='toggleFeed()'><h3>Live conversation</h3><span class='chev' id='feedChev'>▼</span></div>
+<div class='tabs' id='feedTabs'></div><div class='feed' id='feed'></div></div>
 <div class='card'><h3>Open positions</h3><div id='positions'></div></div>
 <div class='card'><h3>Closed positions</h3><div id='closed'></div></div>
 
@@ -349,17 +411,32 @@ h4{font-size:11px;text-transform:uppercase;color:var(--mut);margin:13px 0 3px} s
 <div class='card'><h3>Suggest a trend</h3><input id='trendin' placeholder='e.g. undersea cables, water scarcity\u2026'>
 <button class='mini' onclick='trend("Ada")'>Send to Ada</button> <button class='mini' onclick='trend("Boone")'>Send to Boone</button>
 <div id='trendout' class='mut' style='margin-top:8px'></div></div>
+<div class='card'><h3>System review</h3><p class='mut' style='margin-top:0'>Ask a fresh agent to audit this whole setup — sizing, cadence, diversification — for ways to improve returns.</p>
+<button class='mini' onclick='review()'>\U0001f50d Review my system</button><div id='reviewout' class='mut' style='margin-top:8px'></div></div>
 
 <div class='mut'>To change the system itself, use Claude Code on the server (<code>cd research-lab &amp;&amp; claude</code>). Your positions live safely in state and survive changes.</div>
 </div>
 <div class='overlay' id='ov'><div class='modal' id='ovb'></div></div>
 <script>
-let lastEv=-1, STATE=null; const $=id=>document.getElementById(id);
+let STATE=null, FEED_FILTER='all', tabsBuilt=false; const $=id=>document.getElementById(id);
 const BASE=location.pathname.replace(/\\/$/,'');
 function toggleFeed(force){let c;try{c=force!==undefined?force:localStorage.getItem('feedCollapsed')!=='1';}catch(e){c=force!==undefined?force:!$('feed').classList.contains('collapsed');}
  $('feed').classList.toggle('collapsed',c);$('feedChev').classList.toggle('collapsed',c);
  try{localStorage.setItem('feedCollapsed',c?'1':'0');}catch(e){}}
 try{toggleFeed(localStorage.getItem('feedCollapsed')==='1');}catch(e){}
+function buildFeedTabs(researchers){if(tabsBuilt||!researchers)return;tabsBuilt=true;
+ const el=$('feedTabs'); const mk=(val,label)=>{const b=document.createElement('button');b.className='mini tab'+(val===FEED_FILTER?' active':'');
+   b.textContent=label;b.onclick=(e)=>{e.stopPropagation();FEED_FILTER=val;document.querySelectorAll('#feedTabs .tab').forEach(x=>x.classList.toggle('active',x===b));renderFeed();};
+   return b;};
+ el.appendChild(mk('all','All'));
+ researchers.forEach(r=>el.appendChild(mk(r.name,r.name+' & '+r.judge)));}
+function renderFeed(){if(!STATE)return;const f=$('feed'); const atBottom=f.scrollHeight-f.scrollTop-f.clientHeight<60;
+ const evs=STATE.events.filter(e=>FEED_FILTER==='all'||e.pair===FEED_FILTER||!e.pair);
+ f.innerHTML='';
+ evs.forEach(e=>{const d=document.createElement('div');d.className='m '+e.who;
+   if(e.who!=='s'){const w=document.createElement('div');w.className='who';w.textContent=(e.who==='r'?'Researcher':'Judge')+(e.pair?' \u00b7 '+e.pair:'');d.appendChild(w);}
+   const t=document.createElement('div');t.textContent=e.text;d.appendChild(t);f.appendChild(d);});
+ if(atBottom)f.scrollTop=f.scrollHeight;}
 function fmt(n){return n==null?'\u2014':'$'+Math.round(n).toLocaleString()}
 function pc(n){return n==null?'\u2014':(n>=0?'+':'')+n.toFixed(1)+'%'}
 function chart(vals){if(!vals||vals.length<2)return"<p class='mut'>chart builds as it runs</p>";
@@ -371,13 +448,11 @@ function render(s){const r=s.run;
  $('runline').textContent=r.running?('cycle '+r.cycles+' \u00b7 running '+Math.floor(r.elapsed/60)+'m \u00b7 auto-stops in '+Math.floor(r.remaining/3600)+'h'+Math.floor(r.remaining%3600/60)+'m'):(r.cycles?('stopped after '+r.cycles+' cycles'):'idle \u2014 press Go');
  const p=s.portfolio; $('p_total').textContent=fmt(p.total);$('p_inv').textContent=fmt(p.invested);$('p_cash').textContent=fmt(p.cash);
  $('p_pct').textContent=pc(p.port_pct); $('p_pct').className='big '+((p.port_pct||0)>=0?'up':'dn');
- $('p_bench').textContent='since inception, vs '+Object.entries(p.benchmarks).map(([k,v])=>k+' '+pc(v)).join(' \u00b7 ');
+ const costs=s.costs||{today:0,total:0};
+ $('p_cost').textContent='$'+costs.today.toFixed(2);
+ $('p_bench').textContent='since inception, vs '+Object.entries(p.benchmarks).map(([k,v])=>k+' '+pc(v)).join(' \u00b7 ')+' \u00b7 lifetime AI cost $'+costs.total.toFixed(2);
  $('chart').innerHTML=chart(p.curve);
- const f=$('feed'); const atBottom=f.scrollHeight-f.scrollTop-f.clientHeight<60;
- s.events.filter(e=>e.i>lastEv).forEach(e=>{lastEv=e.i;const d=document.createElement('div');d.className='m '+e.who;
-   if(e.who!=='s'){const w=document.createElement('div');w.className='who';w.textContent=(e.who==='r'?'Researcher':'Judge')+(e.pair?' \u00b7 '+e.pair:'');d.appendChild(w);}
-   const t=document.createElement('div');t.textContent=e.text;d.appendChild(t);f.appendChild(d);});
- if(atBottom)f.scrollTop=f.scrollHeight;
+ buildFeedTabs(s.researchers); renderFeed();
  $('positions').innerHTML=s.positions.length?s.positions.map((x,i)=>{
    const legs=x.legs.map(l=>'$'+Math.round(l.amount).toLocaleString()+'@$'+l.price).join(' + ');const ch=x.challenges||{};
    return "<div class='pos'><b>"+x.tk+"</b> <span class='mut'>"+x.name+" \u00b7 "+x.researcher+"</span>"+
@@ -407,6 +482,10 @@ async function ask(){const q=$('askin').value.trim();if(!q)return;$('askout').te
  const r=await (await fetch(BASE+'/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q})})).json();$('askout').textContent=r.answer;}
 async function trend(who){const t=$('trendin').value.trim();if(!t)return;$('trendout').textContent=who+' is researching "'+t+'"\u2026';
  const r=await (await fetch(BASE+'/api/trend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trend:t,researcher:who})})).json();$('trendout').textContent=r.result+' (see the conversation feed)';}
+async function review(){$('reviewout').textContent='auditing the system\u2026 this can take a minute (live web research)\u2026';
+ const r=await (await fetch(BASE+'/api/review',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+ $('reviewout').textContent='done \u2014 see the report.';
+ open2("<h3>\U0001f50d System review</h3><p style='white-space:pre-wrap'>"+(r.review||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')+"</p><p class='mut' style='margin-top:12px'>Not investment advice.</p>");}
 poll();setInterval(poll,4000);
 </script></body></html>"""
 

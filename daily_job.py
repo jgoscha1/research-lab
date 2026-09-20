@@ -3,8 +3,8 @@
 Each run:
   1. Back up state.
   2. Mark holdings with fresh prices; each Judge reviews hold / add / sell.
-  3. Each researcher hunts new Robinhood-buyable small caps; each survivor is
-     gated (real exchange + cap band) and interrogated by its Judge; accepted
+  3. Each researcher hunts new Robinhood-buyable stocks of any size; each
+     survivor is gated (real exchange) and interrogated by its Judge; accepted
      names are bought on paper.
   4. Record the portfolio value vs benchmarks; write report + summary; save.
 
@@ -62,7 +62,7 @@ def run():
             else:
                 pos["challenges"]["held"] += 1
 
-    # ---- researchers hunt new small caps ----
+    # ---- researchers hunt new ideas ----
     for r in config.RESEARCHERS:
         rstate = state["researchers"].setdefault(r["name"], {"proposed": []})
         if pf.open_count() >= config.MAX_OPEN_POSITIONS:
@@ -79,7 +79,7 @@ def run():
             rstate["proposed"].append(tk); avoid.append(tk)
             elig = market.eligibility(tk)
             if not elig["tradeable"]:
-                events.append(f"{r['name']} → {tk}: skipped (not Robinhood small-cap: {', '.join(elig['reasons'])}).")
+                events.append(f"{r['name']} → {tk}: skipped (not Robinhood-buyable: {', '.join(elig['reasons'])}).")
                 continue
             verdict = llm.judge_new(r, rec)
             if verdict["decision"] == "accept":

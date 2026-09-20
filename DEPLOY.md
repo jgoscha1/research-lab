@@ -1,10 +1,10 @@
 # Research Lab — deploy guide
 
 A self-running research system: two AI **researchers** hunt Robinhood-buyable US
-**small caps**, each defends its picks to its own skeptical **Judge**, and a
-**paper portfolio** tracks the results against the market (S&P 500 and the
-Russell 2000 small-cap index). It runs once a day on a small cloud machine and
-you can change it in plain English with Claude Code.
+**stocks of any size**, each defends its picks to its own skeptical **Judge**,
+and a **paper portfolio** tracks the results against the market (S&P 500 and
+the Russell 2000 small-cap index). It runs once a day on a small cloud machine
+and you can change it in plain English with Claude Code.
 
 **It places no real orders.** It researches and paper-trades so you can see, over
 months, whether the picks beat an index before any real money is involved.
@@ -16,10 +16,10 @@ months, whether the picks beat an index before any real money is involved.
 1. Backs up its state.
 2. Prices your holdings; each Judge re-challenges every position → **hold / buy
    more / sell** (with reasons, recorded).
-3. Each researcher hunts new small-cap ideas via live web research; each idea is
-   **gated** (must be a real major-exchange small cap you could buy on
-   Robinhood — no OTC/pink sheets, inside the market-cap band) and then
-   **interrogated** by its Judge; accepted names are bought on paper.
+3. Each researcher hunts new ideas via live web research, any market cap; each
+   idea is **gated** (must be a real major-exchange stock you could buy on
+   Robinhood — no OTC/pink sheets) and then **interrogated** by its Judge;
+   accepted names are bought on paper.
 4. Marks the portfolio value vs SPY and IWM; writes `daily_report.md` and
    `summary.md`; saves state.
 
@@ -46,15 +46,16 @@ python3 daily_job.py          # run a full day now (then cron runs it daily)
 Results: `summary.md` (plain-English bullets), `daily_report.md` (full),
 `state/reslab_state.json` (positions, cost basis, closed trades, benchmark curve).
 
-## What "Robinhood-buyable small cap" means here
+## What "Robinhood-buyable" means here
 
 `reslab/config.py` restricts buys to **major US exchanges** — Nasdaq
-(NMS/NGM/NCM), NYSE (NYQ), NYSE American/AMEX (ASE), Cboe (BATS/PCX) — and a
-market-cap band (default **$300M–$5B**) above a **$2 price floor**. That matches
-what Robinhood lets you trade (it does **not** trade OTC/pink-sheet stocks). The
-check is best-effort from market data; confirm a name is tradeable in your own
-Robinhood app before ever acting on it. Tune the band and exchanges via the
-`RESLAB_*` variables in `.env`.
+(NMS/NGM/NCM), NYSE (NYQ), NYSE American/AMEX (ASE), Cboe (BATS/PCX) — above a
+**$2 price floor**, with no market-cap band, so any size (small-cap to
+mega-cap) is eligible. That matches what Robinhood lets you trade (it does
+**not** trade OTC/pink-sheet stocks). The check is best-effort from market
+data; confirm a name is tradeable in your own Robinhood app before ever acting
+on it. Tune the exchanges and price floor via the `RESLAB_*` variables in
+`.env`.
 
 Note: this system does **not** connect to Robinhood to place orders. Automated
 equity execution is a separate, higher-risk step (Robinhood's agentic-trading

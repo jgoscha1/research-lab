@@ -1,8 +1,8 @@
-"""reslab — an LLM-driven small-cap research system with a paper portfolio.
+"""reslab — an LLM-driven equity research system with a paper portfolio.
 
-Two researchers, each with a skeptical Judge, hunt Robinhood-buyable US small
-caps, defend picks to their Judge, and run a paper portfolio benchmarked against
-the market. Nothing here places real orders.
+Two researchers, each with a skeptical Judge, hunt Robinhood-buyable US stocks
+of any size, defend picks to their Judge, and run a paper portfolio benchmarked
+against the market. Nothing here places real orders.
 """
 from . import config, market, llm, portfolio, store, report
 
