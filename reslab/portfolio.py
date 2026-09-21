@@ -77,7 +77,7 @@ class Portfolio:
             pos = {"ticker": tk, "name": name, "researcher": researcher,
                    "thesis": thesis, "opened": _today(), "legs": [],
                    "shares": 0.0, "cost_basis": 0.0,
-                   "challenges": {"total": 0, "held": 0, "added": 0}}
+                   "challenges": {"total": 0, "held": 0, "added": 0, "trimmed": 0}}
             self.s["positions"][tk] = pos
         pos["legs"].append({"date": _today(), "kind": "initial" if not pos["legs"] else "add",
                             "price": round(price, 4), "amount": round(amount, 2),
@@ -94,17 +94,34 @@ class Portfolio:
         return pos is not None and (pos["cost_basis"] + amount) <= config.MAX_POSITION \
             and amount <= self.s["cash"]
 
-    def sell(self, tk, price, reason):
+    def sell(self, tk, price, reason, fraction=1.0):
+        """Sell all (fraction=1.0, default) or part of a position. A partial
+        sell reduces shares/cost_basis in place and leaves the rest held; a
+        full sell (fraction>=~1) closes the position entirely. Either way a
+        realized-P&L record is appended to closed."""
         tk = tk.upper()
-        pos = self.s["positions"].pop(tk, None)
+        pos = self.s["positions"].get(tk)
         if pos is None or price is None:
             return None
-        proceeds = pos["shares"] * price
-        pnl = proceeds - pos["cost_basis"]
-        pnl_pct = (pnl / pos["cost_basis"] * 100) if pos["cost_basis"] else 0.0
-        rec = {**pos, "sold": _today(), "sell_price": round(price, 4),
+        fraction = max(0.01, min(1.0, fraction))
+        full_exit = fraction >= 0.999
+        shares_sold = pos["shares"] * fraction
+        cost_sold = pos["cost_basis"] * fraction
+        proceeds = shares_sold * price
+        pnl = proceeds - cost_sold
+        pnl_pct = (pnl / cost_sold * 100) if cost_sold else 0.0
+        if full_exit:
+            self.s["positions"].pop(tk, None)
+        else:
+            pos["shares"] -= shares_sold
+            pos["cost_basis"] -= cost_sold
+            pos["legs"].append({"date": _today(), "kind": "trim", "price": round(price, 4),
+                                "amount": -round(proceeds, 2), "shares": -round(shares_sold, 6)})
+        rec = {"ticker": tk, "name": pos.get("name", ""), "researcher": pos.get("researcher", ""),
+               "shares": round(shares_sold, 6), "cost_basis": round(cost_sold, 2),
+               "sold": _today(), "sell_price": round(price, 4),
                "proceeds": round(proceeds, 2), "pnl": round(pnl, 2),
-               "pnl_pct": round(pnl_pct, 2), "sell_reason": reason}
+               "pnl_pct": round(pnl_pct, 2), "sell_reason": reason, "partial": not full_exit}
         self.s["closed"].append(rec)
         self.s["cash"] += proceeds
         return rec

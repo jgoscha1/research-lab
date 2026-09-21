@@ -137,11 +137,14 @@ portfolio. Cost basis ${cost:.0f}, current value ${value:.0f} ({pnl:+.1f}%). \
 Original thesis: {thesis}
 
 Using web search for any news since, decide today's action. Add only if the \
-thesis strengthened AND it isn't already stretched; sell if the thesis broke or \
-it now lags a simple index; otherwise hold.
+thesis strengthened AND it isn't already stretched; sell the WHOLE position if \
+the thesis broke or it now lags a simple index; trim PART of it if you'd rather \
+lock in some gains or cut risk without fully exiting (set "trim_pct" to the \
+percent of current shares to sell, e.g. 25, 33, 50); otherwise hold.
 
 Respond ONLY as JSON:
-{{"action":"hold|add|sell","reasoning":"2-3 sentences, first person, what changed"}}"""
+{{"action":"hold|add|trim|sell","trim_pct":0,
+"reasoning":"2-3 sentences, first person, what changed"}}"""
 
 
 def research(researcher: dict, avoid: list[str], trend_focus: str | None = None) -> dict:

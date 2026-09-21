@@ -144,6 +144,12 @@ def one_cycle(cyc):
         if d["action"] == "sell":
             rec = p.sell(tk, px, d.get("reasoning", "sell"))
             if rec: log("s", r["name"], f"SOLD {tk} {rec['pnl_pct']:+.1f}% (${rec['pnl']:+,.0f}).", "sys")
+        elif d["action"] == "trim" and px:
+            frac = max(1, min(90, int(d.get("trim_pct") or 50))) / 100.0
+            rec = p.sell(tk, px, d.get("reasoning", "trim"), fraction=frac)
+            if rec:
+                pos["challenges"]["trimmed"] = pos["challenges"].get("trimmed", 0) + 1
+                log("s", r["name"], f"TRIMMED {int(frac*100)}% of {tk} {rec['pnl_pct']:+.1f}% (${rec['pnl']:+,.0f}) — still holding the rest.", "sys")
         elif d["action"] == "add" and p.can_add(tk, config.ADD_SIZE) and px:
             if p.buy(tk, pos["name"], r["name"], pos["thesis"], px, config.ADD_SIZE):
                 pos["challenges"]["added"] += 1
@@ -218,6 +224,25 @@ def _pct(curve, key=None):
     return (b / a - 1) * 100 if a else None
 
 
+def _bench_dollar_series(curve, key, base_value):
+    """Forward-filled benchmark index level for `key`, rescaled so it starts
+    at base_value — the same starting dollar amount as the portfolio curve —
+    so the two can be overlaid on one chart as an apples-to-apples comparison."""
+    out = []
+    last = None
+    base_level = None
+    for c in curve:
+        lvl = c.get("benchmarks", {}).get(key)
+        if lvl:
+            last = lvl
+            if base_level is None:
+                base_level = lvl
+        out.append(last)
+    if not base_level or base_value is None:
+        return [None] * len(curve)
+    return [round(base_value * (v / base_level), 2) if v else None for v in out]
+
+
 def state_json():
     st = _state()
     pfs = portfolio.load_portfolios(st)
@@ -243,16 +268,20 @@ def state_json():
             })
         closed.extend({"tk": c["ticker"], "name": c.get("name", ""), "by": c.get("researcher", ""),
                         "pnl": c["pnl"], "pnl_pct": c["pnl_pct"], "sell_reason": c.get("sell_reason", ""),
-                        "portfolio_id": pf.s["id"]}
+                        "partial": c.get("partial", False), "portfolio_id": pf.s["id"]}
                        for c in pf.s.get("closed", []))
         cash = pf.s.get("cash", 0.0); curve = pf.s.get("curve", [])
         total = cash + holdings_val
         combined_total += total
+        window = [c["value"] for c in curve][-120:]
+        base_value = window[0] if window else None
+        bench_curves = {b: _bench_dollar_series(curve, b, base_value)[-120:] for b in config.BENCHMARKS}
         portfolios.append({
             "id": pf.s["id"], "created": pf.s.get("created", ""),
             "total": total, "invested": pf.invested_total(), "cash": cash,
+            "pnl_dollar": total - config.CASH_BUDGET,
             "port_pct": _pct(curve), "benchmarks": {b: _pct(curve, b) for b in config.BENCHMARKS},
-            "curve": [c["value"] for c in curve][-120:],
+            "curve": window, "bench_curves": bench_curves,
             "open_count": pf.open_count(), "max_open": config.MAX_OPEN_POSITIONS,
             "accepts_new": pf.accepts_new(),
         })
@@ -282,9 +311,10 @@ def price_history(tk):
     except Exception:
         df = None
     if df is None or not len(df):
-        return {"labels": [], "prices": []}
+        return {"labels": [], "prices": [], "dates": []}
     s = df["close"]; step = max(1, len(s) // 60); s = s.iloc[::step]
     return {"labels": [d.strftime("%b %y") for d in s.index],
+            "dates": [d.strftime("%Y-%m-%d") for d in s.index],
             "prices": [round(float(x), 2) for x in s.values]}
 
 
@@ -571,10 +601,29 @@ function renderFeed(){if(!STATE)return;const f=$('feed'); const atBottom=f.scrol
    const t=document.createElement('div');t.textContent=e.text;d.appendChild(t);f.appendChild(d);});
  if(atBottom)f.scrollTop=f.scrollHeight;}
 function fmt(n){return n==null?'\u2014':'$'+Math.round(n).toLocaleString()}
+function fmtSigned(n){if(n==null)return '\u2014';return (n>=0?'+':'-')+'$'+Math.abs(Math.round(n)).toLocaleString();}
 function pc(n){return n==null?'\u2014':(n>=0?'+':'')+n.toFixed(1)+'%'}
+function trunc(s,n){if(!s)return '';return s.length>n?s.slice(0,n).trim()+'\u2026':s;}
 function chart(vals){if(!vals||vals.length<2)return"<p class='mut'>chart builds as it runs</p>";
  const lo=Math.min(...vals),hi=Math.max(...vals),W=640,H=120,p=6,x=i=>p+i*(W-2*p)/(vals.length-1),y=v=>H-p-(v-lo)/((hi-lo)||1)*(H-2*p);
  return "<svg viewBox='0 0 "+W+" "+H+"'><path d='"+vals.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ')+"' fill='none' stroke='#60a5fa' stroke-width='2'/></svg>";}
+const BENCH_COLORS={SPY:'#f59e0b',QQQ:'#c084fc'};
+const BENCH_PALETTE=['#34d399','#f472b6','#38bdf8'];
+function multiChart(series){
+ const all=[]; series.forEach(s=>(s.vals||[]).forEach(v=>{if(v!=null)all.push(v);}));
+ if(all.length<2)return "<p class='mut'>chart builds as it runs</p>";
+ const lo=Math.min(...all),hi=Math.max(...all),W=640,H=120,p=6;
+ const n=Math.max(...series.map(s=>(s.vals||[]).length));
+ if(n<2)return "<p class='mut'>chart builds as it runs</p>";
+ const x=i=>p+i*(W-2*p)/(n-1),y=v=>H-p-(v-lo)/((hi-lo)||1)*(H-2*p);
+ const paths=series.map(s=>{let d='',started=false;
+   (s.vals||[]).forEach((v,i)=>{if(v==null)return;d+=(started?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)+' ';started=true;});
+   return d?"<path d='"+d.trim()+"' fill='none' stroke='"+s.color+"' stroke-width='2'/>":'';
+ }).join('');
+ const legend=series.map(s=>"<span style='display:inline-flex;align-items:center;gap:4px;margin-right:12px'>"+
+   "<span style='width:8px;height:8px;border-radius:50%;background:"+s.color+";display:inline-block'></span>"+
+   "<span class='mut' style='font-size:11px'>"+s.label+"</span></span>").join('');
+ return "<svg viewBox='0 0 "+W+" "+H+"'>"+paths+"</svg><div style='margin-top:4px'>"+legend+"</div>";}
 async function poll(){try{STATE=await (await fetch(BASE+'/api/state')).json();render(STATE);}catch(e){}}
 function render(s){const r=s.run;
  $('status').innerHTML="<span class='dot "+(r.running?'on':'off')+"'></span>"+(r.running?'running':'stopped');
@@ -589,21 +638,22 @@ function render(s){const r=s.run;
      "<span class='stat'><span class='mut'>Total</span><br><span class='big'>"+fmt(p.total)+"</span></span>"+
      "<span class='stat'><span class='mut'>Invested</span><br><span class='big'>"+fmt(p.invested)+"</span></span>"+
      "<span class='stat'><span class='mut'>Cash</span><br><span class='big'>"+fmt(p.cash)+"</span></span>"+
-     "<span class='stat'><span class='mut'>vs market</span><br><span class='big "+((p.port_pct||0)>=0?'up':'dn')+"'>"+pc(p.port_pct)+"</span></span>"+
+     "<span class='stat'><span class='mut'>P&amp;L</span><br><span class='big "+((p.pnl_dollar||0)>=0?'up':'dn')+"'>"+fmtSigned(p.pnl_dollar)+"</span><br><span class='mut'>"+pc(p.port_pct)+"</span></span>"+
      "<span class='stat'><span class='mut'>Positions</span><br><span class='big'>"+p.open_count+"/"+p.max_open+"</span></span>"+
      "<div class='mut' style='margin-top:6px'>since inception, vs "+Object.entries(p.benchmarks).map(([k,v])=>k+' '+pc(v)).join(' \u00b7 ')+"</div>"+
-     "<div style='margin-top:8px'>"+chart(p.curve)+"</div></div>";
+     "<div style='margin-top:8px'>"+multiChart([{vals:p.curve,color:'#60a5fa',label:'Portfolio'}].concat(
+       Object.entries(p.bench_curves||{}).map(([k,v],idx)=>({vals:v,color:BENCH_COLORS[k]||BENCH_PALETTE[idx%BENCH_PALETTE.length],label:k}))))+"</div></div>";
  }).join(''):"<span class='mut'>No portfolio yet \u2014 press Go and one starts automatically.</span>";
  buildFeedTabs(s.researchers); renderFeed();
  $('positions').innerHTML=s.positions.length?s.positions.map((x,i)=>{
    const legs=x.legs.map(l=>'$'+Math.round(l.amount).toLocaleString()+'@$'+l.price).join(' + ');const ch=x.challenges||{};
    return "<div class='pos'><b>"+x.tk+"</b> <span class='mut'>P"+x.portfolio_id+" \u00b7 "+x.name+" \u00b7 "+x.researcher+"</span>"+
-     "<div class='mut'>Bought $"+(x.buy_price||'\u2014')+" \u2192 $"+(x.cur?x.cur.toFixed(2):'\u2014')+" <span class='"+((x.pnl_pct||0)>=0?'up':'dn')+"'>"+pc(x.pnl_pct)+"</span></div>"+
-     "<div class='mut'>Invested "+fmt(x.cost_basis)+" ["+legs+"] \u2192 value "+fmt(x.value)+" \u00b7 challenged "+(ch.total||0)+"\u00d7 (held "+(ch.held||0)+", added "+(ch.added||0)+")</div>"+
-     "<div style='margin-top:6px'>"+((x.rec||x.verdict)?"<button class='mini' onclick='rep("+i+")'>report \u25b8</button> ":"")+"<button class='mini' onclick='chartOf(\\""+x.tk+"\\")'>chart \u25b8</button></div></div>";
+     "<div class='mut'>Bought $"+(x.buy_price||'\u2014')+" \u2192 $"+(x.cur?x.cur.toFixed(2):'\u2014')+" <span class='"+((x.pnl_pct||0)>=0?'up':'dn')+"'>"+pc(x.pnl_pct)+" ("+fmtSigned(x.pnl)+")</span></div>"+
+     "<div class='mut'>Invested "+fmt(x.cost_basis)+" ["+legs+"] \u2192 value "+fmt(x.value)+" \u00b7 challenged "+(ch.total||0)+"\u00d7 (held "+(ch.held||0)+", added "+(ch.added||0)+", trimmed "+(ch.trimmed||0)+")</div>"+
+     "<div style='margin-top:6px'>"+((x.rec||x.verdict)?"<button class='mini' onclick='rep("+i+")'>report \u25b8</button> ":"")+"<button class='mini' onclick='chartOf("+i+")'>chart \u25b8</button></div></div>";
  }).join(''):"<span class='mut'>No open positions yet \u2014 press Go and watch them appear.</span>";
  $('closed').innerHTML=s.closed.length?"<table>"+s.closed.slice().reverse().map(c=>
-   "<tr><td><b>"+c.tk+"</b> <span class='mut'>P"+c.portfolio_id+" \u00b7 "+c.by+"</span></td><td class='"+(c.pnl>=0?'up':'dn')+"'>"+pc(c.pnl_pct)+" ($"+Math.round(c.pnl).toLocaleString()+")</td><td class='mut'>"+(c.sell_reason||'').slice(0,90)+"</td></tr>").join('')+"</table>":"<span class='mut'>none yet</span>";
+   "<tr><td><b>"+c.tk+"</b>"+(c.partial?" <span class='mut' style='font-size:11px'>(trim)</span>":"")+" <span class='mut'>P"+c.portfolio_id+" \u00b7 "+c.by+"</span></td><td class='"+(c.pnl>=0?'up':'dn')+"'>"+pc(c.pnl_pct)+" ($"+Math.round(c.pnl).toLocaleString()+")</td><td class='mut'>"+(c.sell_reason||'').slice(0,90)+"</td></tr>").join('')+"</table>":"<span class='mut'>none yet</span>";
  renderTrends(s.trends);
 }
 let TRENDS_OPEN=new Set(), TREND_MSG={};
@@ -622,9 +672,9 @@ function renderTrends(list){const el=$('trends'); if(!list){return;}
      "</div>").join(''):"<span class='mut'>no stocks yet</span>";
    return "<div class='pos' style='margin-bottom:8px'>"+
      "<div style='cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:8px' onclick='toggleTrend("+t.id+")'>"+
-       "<div><b>"+t.text+"</b><div class='mut' style='margin-top:2px'>"+t.researcher+" · "+t.origin+" · "+summary+"</div></div>"+
+       "<div><b>"+trunc(t.text,64)+"</b><div class='mut' style='margin-top:2px'>"+t.researcher+" · "+t.origin+" · "+summary+"</div></div>"+
        "<span class='chev"+(open?'':' collapsed')+"'>▼</span></div>"+
-     (open?("<div style='margin-top:8px'>"+stocksHtml+
+     (open?("<div style='margin-top:8px'><p style='margin:0 0 8px'>"+t.text+"</p>"+stocksHtml+
        "<div style='margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center'>"+
          "<button class='mini' onclick='event.stopPropagation();findOthers("+t.id+")'>find others ▸</button>"+
          "<input id='ti_"+t.id+"' placeholder='suggest a ticker, e.g. NVDA' style='flex:1;min-width:140px;margin:0' onclick='event.stopPropagation()'>"+
@@ -646,11 +696,22 @@ function rep(i){const x=STATE.positions[i];const r=x.rec||{};const v=x.verdict||
   "<h4>Thesis</h4><p>"+(r.thesis||x.thesis||'')+"</p>"+(r.valuation?"<h4>Valuation</h4><p>"+r.valuation+"</p>":"")+
   (r.catalyst?"<h4>Catalyst</h4><p>"+r.catalyst+"</p>":"")+(r.risks?"<h4>Risks</h4><p>"+r.risks+"</p>":"")+
   "<h4>\u2696\ufe0e Judge</h4><p>"+(v.reasoning||'')+"</p><p class='mut' style='margin-top:12px'>Not investment advice.</p>");}
-async function chartOf(tk){open2("<h3>"+tk+" \u00b7 12-month price</h3><p class='mut'>loading\u2026</p>");
+async function chartOf(i){const x=STATE.positions[i]; const tk=x.tk;
+ open2("<h3>"+tk+" \u00b7 12-month price</h3><p class='mut'>loading\u2026</p>");
  const h=await (await fetch(BASE+'/api/history?tk='+tk)).json();
  if(!h.prices.length){$('ovb').innerHTML="<h3>"+tk+"</h3><p class='mut'>no price history available</p>";return;}
- const lo=Math.min(...h.prices),hi=Math.max(...h.prices),W=560,H=200,p=8,x=i=>p+i*(W-2*p)/(h.prices.length-1),y=v=>H-p-(v-lo)/((hi-lo)||1)*(H-2*p);
- open2("<h3>"+tk+" \u00b7 12-month price</h3><svg viewBox='0 0 "+W+" "+H+"'><text x='2' y='12' font-size='10' fill='#9aa1ab'>$"+hi.toFixed(0)+"</text><text x='2' y='"+(H-2)+"' font-size='10' fill='#9aa1ab'>$"+lo.toFixed(0)+"</text><path d='"+h.prices.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ')+"' fill='none' stroke='#60a5fa' stroke-width='2'/></svg><p class='mut'>via yfinance</p>");}
+ const lo=Math.min(...h.prices),hi=Math.max(...h.prices),W=560,H=200,p=8,xf=i2=>p+i2*(W-2*p)/(h.prices.length-1),yf=v=>H-p-(v-lo)/((hi-lo)||1)*(H-2*p);
+ let markers='';
+ (x.legs||[]).forEach(leg=>{
+   if(!h.dates||!h.dates.length)return;
+   let best=0,bd=Infinity; const ld=new Date(leg.date).getTime();
+   h.dates.forEach((d,di)=>{const diff=Math.abs(new Date(d).getTime()-ld); if(diff<bd){bd=diff;best=di;}});
+   const cy=yf(Math.max(lo,Math.min(hi,leg.price)));
+   const color=leg.kind==='initial'?'#4ade80':(leg.kind==='trim'?'#f87171':'#38bdf8');
+   const verb=leg.kind==='initial'?'Bought':(leg.kind==='trim'?'Trimmed':'Added');
+   markers+="<circle cx='"+xf(best).toFixed(1)+"' cy='"+cy.toFixed(1)+"' r='4' fill='"+color+"' stroke='#0f1115' stroke-width='1.5'><title>"+verb+" $"+Math.abs(Math.round(leg.amount)).toLocaleString()+" @ $"+leg.price+" on "+leg.date+"</title></circle>";
+ });
+ open2("<h3>"+tk+" \u00b7 12-month price</h3><svg viewBox='0 0 "+W+" "+H+"'><text x='2' y='12' font-size='10' fill='#9aa1ab'>$"+hi.toFixed(0)+"</text><text x='2' y='"+(H-2)+"' font-size='10' fill='#9aa1ab'>$"+lo.toFixed(0)+"</text><path d='"+h.prices.map((v,i2)=>(i2?'L':'M')+xf(i2).toFixed(1)+' '+yf(v).toFixed(1)).join(' ')+"' fill='none' stroke='#60a5fa' stroke-width='2'/>"+markers+"</svg><p class='mut'>via yfinance \u00b7 dots mark buys (green), adds (blue), trims (red)</p>");}
 function open2(html){$('ovb').innerHTML=html+"<div style='margin-top:12px'><button class='mini' onclick='cls()'>close</button></div>";$('ov').classList.add('open');}
 function cls(){$('ov').classList.remove('open');}
 $('ov').addEventListener('click',e=>{if(e.target.id==='ov')cls();});
