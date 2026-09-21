@@ -456,7 +456,7 @@ button:hover{border-color:var(--mut)} .go{background:var(--up);color:#06210f;bor
 .stat{display:inline-block;margin-right:20px} .big{font-size:21px;font-weight:700} .mut{color:var(--mut);font-size:12px}
 .up{color:var(--up)} .dn{color:var(--dn)}
 .feed{max-height:340px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:4px}
-.feed.collapsed{display:none}
+.feed.collapsed,#trendsBody.collapsed{display:none}
 .card-head{display:flex;align-items:center;justify-content:space-between;cursor:pointer;gap:8px}
 .card-head h3{margin:0} .chev{color:var(--mut);font-size:11px;transition:transform .15s} .chev.collapsed{transform:rotate(-90deg)}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
@@ -491,8 +491,9 @@ h4{font-size:11px;text-transform:uppercase;color:var(--mut);margin:13px 0 3px} s
 <div class='card'><h3>Open positions</h3><div id='positions'></div></div>
 <div class='card'><h3>Closed positions</h3><div id='closed'></div></div>
 
-<div class='card'><h3>Trends</h3><p class='mut' style='margin-top:0'>Every macro/industry trend a researcher has looked at, and each stock reviewed within it. Click one to expand.</p>
-<div id='trends'></div></div>
+<div class='card'><div class='card-head' onclick='toggleTrendsCard()'><h3>Trends</h3><span class='chev' id='trendsChev'>▼</span></div>
+<div id='trendsBody'><p class='mut' style='margin-top:0'>Every macro/industry trend a researcher has looked at, and each stock reviewed within it. Click one to expand.</p>
+<div id='trends'></div></div></div>
 
 <div class='card'><h3>Ask the lab</h3><input id='askin' placeholder='e.g. which holding is up the most, and why?'>
 <button class='mini' onclick='ask()'>Ask</button><div id='askout' class='mut' style='margin-top:8px'></div></div>
@@ -513,6 +514,10 @@ function toggleFeed(force){let c;try{c=force!==undefined?force:localStorage.getI
  $('feed').classList.toggle('collapsed',c);$('feedChev').classList.toggle('collapsed',c);
  try{localStorage.setItem('feedCollapsed',c?'1':'0');}catch(e){}}
 try{toggleFeed(localStorage.getItem('feedCollapsed')==='1');}catch(e){}
+function toggleTrendsCard(force){let c;try{c=force!==undefined?force:localStorage.getItem('trendsCollapsed')!=='1';}catch(e){c=force!==undefined?force:!$('trendsBody').classList.contains('collapsed');}
+ $('trendsBody').classList.toggle('collapsed',c);$('trendsChev').classList.toggle('collapsed',c);
+ try{localStorage.setItem('trendsCollapsed',c?'1':'0');}catch(e){}}
+try{toggleTrendsCard(localStorage.getItem('trendsCollapsed')==='1');}catch(e){}
 function buildFeedTabs(researchers){if(tabsBuilt||!researchers)return;tabsBuilt=true;
  const el=$('feedTabs'); const mk=(val,label)=>{const b=document.createElement('button');b.className='mini tab'+(val===FEED_FILTER?' active':'');
    b.textContent=label;b.onclick=(e)=>{e.stopPropagation();FEED_FILTER=val;document.querySelectorAll('#feedTabs .tab').forEach(x=>x.classList.toggle('active',x===b));renderFeed();};
