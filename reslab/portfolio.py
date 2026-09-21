@@ -22,6 +22,7 @@ class Portfolio:
         state.setdefault("closed", [])        # list of closed positions
         state.setdefault("cash", config.CASH_BUDGET)
         state.setdefault("curve", [])         # [{date, value, benchmarks:{SPY:..}}]
+        state.setdefault("rounds", 1)         # see max_open()/start_new_round()
         self.s = state
 
     # --- queries ---
@@ -33,6 +34,21 @@ class Portfolio:
 
     def open_count(self):
         return len(self.s["positions"])
+
+    def max_open(self):
+        """Position-count ceiling for the current round (see start_new_round)."""
+        return config.MAX_OPEN_POSITIONS * self.s.get("rounds", 1)
+
+    def at_cap(self):
+        return self.open_count() >= self.max_open()
+
+    def start_new_round(self):
+        """Called when at_cap(): raise the position ceiling by another
+        MAX_OPEN_POSITIONS and inject a fresh CASH_BUDGET of paper capital,
+        so the system keeps researching and buying instead of stalling once
+        it fills its slots. Existing positions are untouched."""
+        self.s["rounds"] = self.s.get("rounds", 1) + 1
+        self.s["cash"] = self.s.get("cash", 0.0) + config.CASH_BUDGET
 
     # --- trades ---
     def buy(self, tk, name, researcher, thesis, price, amount):
