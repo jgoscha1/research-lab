@@ -41,7 +41,7 @@ CASH_BUDGET = _f("RESLAB_CASH_BUDGET", 100000.0)     # paper dollars per run's w
 INITIAL_POSITION = _f("RESLAB_INITIAL_POSITION", 1000.0)
 ADD_SIZE = _f("RESLAB_ADD_SIZE", 600.0)
 MAX_POSITION = _f("RESLAB_MAX_POSITION", 3000.0)     # hard cap per name
-MAX_OPEN_POSITIONS = _i("RESLAB_MAX_OPEN", 12)
+MAX_OPEN_POSITIONS = _i("RESLAB_MAX_OPEN", 30)       # 30 x $3,000 max-per-name = up to $90k deployed
 NEW_IDEAS_PER_DAY = _i("RESLAB_NEW_IDEAS_PER_DAY", 2)  # per researcher
 
 # --- Benchmarks (what "beating the market" means) ---
