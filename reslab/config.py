@@ -45,7 +45,7 @@ MAX_OPEN_POSITIONS = _i("RESLAB_MAX_OPEN", 30)       # 30 x $3,000 max-per-name 
 NEW_IDEAS_PER_DAY = _i("RESLAB_NEW_IDEAS_PER_DAY", 2)  # per researcher
 
 # --- Benchmarks (what "beating the market" means) ---
-BENCHMARKS = [b.strip() for b in os.environ.get("RESLAB_BENCHMARKS", "SPY,IWM").split(",")]
+BENCHMARKS = [b.strip() for b in os.environ.get("RESLAB_BENCHMARKS", "SPY,QQQ").split(",")]
 
 # --- The two researchers (each with its own judge persona) ---
 RESEARCHERS = [

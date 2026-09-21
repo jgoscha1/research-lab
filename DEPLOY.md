@@ -2,9 +2,10 @@
 
 A self-running research system: two AI **researchers** hunt Robinhood-buyable US
 **stocks of any size**, each defends its picks to its own skeptical **Judge**,
-and a **paper portfolio** tracks the results against the market (S&P 500 and
-the Russell 2000 small-cap index). It runs once a day on a small cloud machine
-and you can change it in plain English with Claude Code.
+and each batch of up to 30 picks becomes its own **paper portfolio**, tracked
+independently against the market (S&P 500 and the Nasdaq-100) from its own
+start date. It runs once a day on a small cloud machine and you can change it
+in plain English with Claude Code.
 
 **It places no real orders.** It researches and paper-trades so you can see, over
 months, whether the picks beat an index before any real money is involved.

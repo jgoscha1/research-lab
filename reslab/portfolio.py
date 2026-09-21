@@ -3,6 +3,14 @@
 Positions record every leg (initial buy + each add) so you always see how much
 was invested, when, and at what price, plus current value and P&L. Closed
 positions keep realized P&L. Nothing here places real orders.
+
+The system runs MULTIPLE portfolios, not one. Each holds up to
+MAX_OPEN_POSITIONS names and starts with its own CASH_BUDGET. Once a
+portfolio fills up, the next buy opens a brand-new portfolio — its own cash,
+its own positions, and (because its benchmark curve starts recording from its
+own first mark()) its own since-inception return vs the market, independent
+of every other portfolio. This lets you compare one batch of picks against
+another instead of one number blurring them all together.
 """
 from __future__ import annotations
 
@@ -15,14 +23,25 @@ def _today():
     return str(date.today())
 
 
+def _new_portfolio_dict(pid: int) -> dict:
+    return {"id": pid, "created": _today(), "positions": {}, "closed": [],
+            "cash": config.CASH_BUDGET, "curve": [], "closed_to_new": False}
+
+
 class Portfolio:
     def __init__(self, state: dict):
         # state persists across days (positions, closed, benchmark curve, cash)
+        state.setdefault("id", 1)
+        state.setdefault("created", _today())
         state.setdefault("positions", {})     # ticker -> position
         state.setdefault("closed", [])        # list of closed positions
         state.setdefault("cash", config.CASH_BUDGET)
         state.setdefault("curve", [])         # [{date, value, benchmarks:{SPY:..}}]
-        state.setdefault("rounds", 1)         # see max_open()/start_new_round()
+        # Once a portfolio has ever reached MAX_OPEN_POSITIONS it stays closed
+        # to new buys for good — even if a later sale frees a slot — so each
+        # portfolio stays a clean, comparable "batch of <=N picks" rather than
+        # a revolving pool. Selling still works; only new opens are blocked.
+        state.setdefault("closed_to_new", False)
         self.s = state
 
     # --- queries ---
@@ -35,32 +54,25 @@ class Portfolio:
     def open_count(self):
         return len(self.s["positions"])
 
-    def max_open(self):
-        """Position-count ceiling for the current round (see start_new_round)."""
-        return config.MAX_OPEN_POSITIONS * self.s.get("rounds", 1)
+    def is_full(self):
+        return self.open_count() >= config.MAX_OPEN_POSITIONS
 
-    def at_cap(self):
-        return self.open_count() >= self.max_open()
-
-    def start_new_round(self):
-        """Called when at_cap(): raise the position ceiling by another
-        MAX_OPEN_POSITIONS and inject a fresh CASH_BUDGET of paper capital,
-        so the system keeps researching and buying instead of stalling once
-        it fills its slots. Existing positions are untouched."""
-        self.s["rounds"] = self.s.get("rounds", 1) + 1
-        self.s["cash"] = self.s.get("cash", 0.0) + config.CASH_BUDGET
+    def accepts_new(self):
+        return not self.s.get("closed_to_new", False)
 
     # --- trades ---
     def buy(self, tk, name, researcher, thesis, price, amount):
         tk = tk.upper()
         if price is None or price <= 0 or amount <= 0:
             return False
+        pos = self.s["positions"].get(tk)
+        if pos is None and not self.accepts_new():
+            return False  # this portfolio is a closed batch; open new names elsewhere
         if amount > self.s["cash"]:
             amount = self.s["cash"]
         if amount <= 0:
             return False
         shares = amount / price
-        pos = self.s["positions"].get(tk)
         if pos is None:
             pos = {"ticker": tk, "name": name, "researcher": researcher,
                    "thesis": thesis, "opened": _today(), "legs": [],
@@ -73,6 +85,8 @@ class Portfolio:
         pos["shares"] += shares
         pos["cost_basis"] += amount
         self.s["cash"] -= amount
+        if self.is_full():
+            self.s["closed_to_new"] = True
         return True
 
     def can_add(self, tk, amount):
@@ -118,3 +132,50 @@ class Portfolio:
 
     def invested_total(self):
         return sum(p["cost_basis"] for p in self.s["positions"].values())
+
+
+# --------------------------------------------------------------------------- #
+# Multi-portfolio bookkeeping. These operate on the top-level state dict
+# (state["portfolios"] is a list of the plain dicts Portfolio wraps).
+
+def load_portfolios(state: dict) -> list[Portfolio]:
+    """All portfolios, oldest first. One-time-migrates a legacy single
+    state["portfolio"] dict (from before multi-portfolio support, including
+    the earlier "rounds" scheme) into portfolios[0]."""
+    if "portfolios" not in state:
+        legacy = state.pop("portfolio", None)
+        if legacy:
+            legacy.pop("rounds", None)  # obsolete same-portfolio-expansion scheme
+            legacy.setdefault("id", 1)
+            legacy.setdefault("created", _today())
+            legacy.setdefault("closed_to_new", len(legacy.get("positions", {})) >= config.MAX_OPEN_POSITIONS)
+            state["portfolios"] = [legacy]
+        else:
+            state["portfolios"] = [_new_portfolio_dict(1)]
+    return [Portfolio(p) for p in state["portfolios"]]
+
+
+def active_portfolio(state: dict) -> Portfolio:
+    """The portfolio new names go into: the most recent one still accepting
+    new buys. Creates a fresh one (its own id, cash, empty curve) once the
+    newest has permanently closed to new buys (see Portfolio.accepts_new)."""
+    pfs = load_portfolios(state)
+    if pfs and pfs[-1].accepts_new():
+        return pfs[-1]
+    new_id = (pfs[-1].s["id"] + 1) if pfs else 1
+    new_dict = _new_portfolio_dict(new_id)
+    state["portfolios"].append(new_dict)
+    return Portfolio(new_dict)
+
+
+def all_held_tickers(state: dict) -> list[str]:
+    return [tk for p in load_portfolios(state) for tk in p.held_tickers()]
+
+
+def find_holder(state: dict, tk: str) -> Portfolio | None:
+    """The Portfolio currently holding tk, if any."""
+    tk = tk.upper()
+    for p in load_portfolios(state):
+        if p.position(tk):
+            return p
+    return None
