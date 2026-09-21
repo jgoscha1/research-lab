@@ -4,8 +4,11 @@ A private URL (no login — the address itself is the secret). Press Go and the
 two researchers run continuously (each cycle: research a Robinhood-buyable stock
 of any size, or — once per day per holding — its Judge reviews an existing
 position for buy-more/hold/sell), streaming their conversation live. Stop
-anytime, or it auto-stops after 6 hours. Shows the real portfolio, positions,
-P&L vs SPY/IWM, price charts, 1-page reports, closed trades, and AI spend.
+anytime, or it auto-stops after 6 hours. Buys go into whichever portfolio is
+still accepting new names; once one fills to MAX_OPEN_POSITIONS it's closed
+for good and the next buy starts a fresh portfolio with its own cash, so each
+batch's return vs SPY/QQQ can be judged on its own. Shows every portfolio,
+positions, price charts, 1-page reports, closed trades, and AI spend.
 
 Continuous running spends your Anthropic credit — watch the cycle counter and
 rely on your Console spend cap. Paper only; no real orders.
@@ -24,8 +27,7 @@ from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from reslab import config, market, llm, store, trends  # noqa
-from reslab.portfolio import Portfolio                 # noqa
+from reslab import config, market, llm, store, trends, portfolio  # noqa
 
 PORT = int(os.environ.get("DASH_PORT", "8080"))
 INTERVAL = int(os.environ.get("RUN_INTERVAL_SEC", "90"))
@@ -72,7 +74,7 @@ def price(tk):
 
 def _state():
     st = store.load()
-    st.setdefault("portfolio", {})
+    portfolio.load_portfolios(st)  # migrates legacy state["portfolio"] if present
     st.setdefault("researchers", {})
     st.setdefault("trends", [])
     return st
@@ -81,9 +83,11 @@ def _state():
 STATUS_MAP = {"reject": "rejected", "watch": "watch"}  # judge decision -> trend-stock status
 
 
-def _judge_and_place(st, pf, r, rec, trend_text, trend, bought_note=""):
-    """Judge one pick, buy/skip it, log the outcome, and record it on the trend.
-    Returns True if bought."""
+def _judge_and_place(st, r, rec, trend_text, trend, bought_note=""):
+    """Judge one pick and, if accepted, buy it into the current active portfolio
+    — spawning a brand-new one (its own cash, its own curve) if every existing
+    portfolio is already full. Logs the outcome and records it on the trend
+    either way. Returns True if bought."""
     tk = (rec.get("ticker") or "").upper()
     elig = market.eligibility(tk)
     if not elig["tradeable"]:
@@ -96,15 +100,14 @@ def _judge_and_place(st, pf, r, rec, trend_text, trend, bought_note=""):
         log("s", r["name"], f"{tk}: {verdict['decision']} — not bought.", "sys")
         trends.record_stock(trend, rec, STATUS_MAP.get(verdict["decision"], verdict["decision"]), verdict.get("reasoning", ""))
         return False
-    if pf.at_cap():
-        pf.start_new_round()
-        log("s", "", f"\U0001f4c8 Portfolio full at {pf.max_open() - config.MAX_OPEN_POSITIONS} names — "
-                     f"starting round {pf.s['rounds']} with a fresh ${config.CASH_BUDGET:,.0f} "
-                     f"(cap now {pf.max_open()}).", "sys")
+    pf = portfolio.active_portfolio(st)
+    was_new = pf.open_count() == 0
     px = elig["price"] or price(tk)
     if px and pf.buy(tk, rec.get("name", tk), r["name"], rec.get("thesis", ""), px, config.INITIAL_POSITION):
+        if was_new:
+            log("s", "", f"\U0001f4c8 Starting portfolio {pf.s['id']} with ${config.CASH_BUDGET:,.0f}.", "sys")
         p = pf.position(tk); p["rec"] = rec; p["verdict"] = verdict; p["trend"] = trend_text
-        log("s", r["name"], f"BOUGHT {tk} @ ${px:.2f} (${config.INITIAL_POSITION:,.0f}){bought_note}.", "sys")
+        log("s", r["name"], f"BOUGHT {tk} @ ${px:.2f} (${config.INITIAL_POSITION:,.0f}){bought_note} — portfolio {pf.s['id']}.", "sys")
         trends.record_stock(trend, rec, "bought", verdict.get("reasoning", ""))
         return True
     log("s", r["name"], f"{tk}: accepted, but no price available — not bought.", "sys")
@@ -114,35 +117,42 @@ def _judge_and_place(st, pf, r, rec, trend_text, trend, bought_note=""):
 
 def one_cycle(cyc):
     st = _state()
-    pf = Portfolio(st["portfolio"])
     r = config.RESEARCHERS[cyc % len(config.RESEARCHERS)]
     today = str(date.today())
-    holds = [t for t, p in pf.s["positions"].items() if p["researcher"] == r["name"]]
+    pfs = portfolio.load_portfolios(st)
     # Each holding gets at most one buy/hold/sell review per day — once a
-    # position has been reviewed today, leave it alone until tomorrow.
-    due = [t for t in holds if pf.position(t).get("last_challenge", {}).get("date") != today]
+    # position has been reviewed today, leave it alone until tomorrow. Scans
+    # every portfolio, since a researcher's holdings can span several of them.
+    due = None
+    for p in pfs:
+        for tk, pos in p.s["positions"].items():
+            if pos["researcher"] == r["name"] and pos.get("last_challenge", {}).get("date") != today:
+                due = (p, tk)
+                break
+        if due:
+            break
 
     if due:
-        tk = due[0]
-        pos = pf.position(tk); px = price(tk)
-        v = pf.value_position(tk, px) or {"value": pos["cost_basis"], "pnl_pct": 0}
-        log("r", r["name"], f"Reviewing {tk} — ${v['value']:,.0f} ({v['pnl_pct']:+.1f}%).")
+        p, tk = due
+        pos = p.position(tk); px = price(tk)
+        v = p.value_position(tk, px) or {"value": pos["cost_basis"], "pnl_pct": 0}
+        log("r", r["name"], f"Reviewing {tk} (portfolio {p.s['id']}) — ${v['value']:,.0f} ({v['pnl_pct']:+.1f}%).")
         d = llm.judge_hold(r, pos, v["value"], v["pnl_pct"])
         pos["challenges"]["total"] += 1
         pos["last_challenge"] = {"date": today, "action": d["action"], "reasoning": d.get("reasoning", "")}
         log("j", r["name"], f"{r['judge']}: {d.get('reasoning','')}", "verdict")
         if d["action"] == "sell":
-            rec = pf.sell(tk, px, d.get("reasoning", "sell"))
+            rec = p.sell(tk, px, d.get("reasoning", "sell"))
             if rec: log("s", r["name"], f"SOLD {tk} {rec['pnl_pct']:+.1f}% (${rec['pnl']:+,.0f}).", "sys")
-        elif d["action"] == "add" and pf.can_add(tk, config.ADD_SIZE) and px:
-            if pf.buy(tk, pos["name"], r["name"], pos["thesis"], px, config.ADD_SIZE):
+        elif d["action"] == "add" and p.can_add(tk, config.ADD_SIZE) and px:
+            if p.buy(tk, pos["name"], r["name"], pos["thesis"], px, config.ADD_SIZE):
                 pos["challenges"]["added"] += 1
                 log("s", r["name"], f"ADDED ${config.ADD_SIZE:,.0f} to {tk}.", "sys")
         else:
             pos["challenges"]["held"] += 1
     else:
         rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
-        avoid = pf.held_tickers() + rstate["proposed"][-40:]
+        avoid = portfolio.all_held_tickers(st) + rstate["proposed"][-40:]
         result = llm.research(r, avoid)
         if result.get("_offline"):
             log("s", r["name"], "Live research unavailable (set ANTHROPIC_API_KEY).", "sys")
@@ -156,16 +166,17 @@ def one_cycle(cyc):
                 continue
             rstate["proposed"].append(tk); avoid.append(tk)
             log("r", r["name"], f"{tk} — {rec.get('thesis','')}")
-            _judge_and_place(st, pf, r, rec, trend_text, trend)
+            _judge_and_place(st, r, rec, trend_text, trend)
 
-    prices = {t: price(t) for t in pf.held_tickers()}
-    prices = {t: p for t, p in prices.items() if p}
     bench = {b: price(b) for b in config.BENCHMARKS}
     bench = {b: p for b, p in bench.items() if p}
-    curve = pf.s.setdefault("curve", [])
-    if not curve or curve[-1]["date"] != str(date.today()) or (cyc % 8 == 0):
-        pf.mark(prices, bench)
-        del pf.s["curve"][:-3000]
+    for p in portfolio.load_portfolios(st):
+        prices = {t: price(t) for t in p.held_tickers()}
+        prices = {t: pv for t, pv in prices.items() if pv}
+        curve = p.s.setdefault("curve", [])
+        if not curve or curve[-1]["date"] != today or (cyc % 8 == 0):
+            p.mark(prices, bench)
+            del p.s["curve"][:-3000]
     store.save(st)
 
 
@@ -197,50 +208,66 @@ def stop():
     RUN["running"] = False
 
 
+def _pct(curve, key=None):
+    if not curve: return None
+    if key is None: a, b = curve[0]["value"], curve[-1]["value"]
+    else:
+        pts = [c["benchmarks"].get(key) for c in curve if c["benchmarks"].get(key)]
+        if not pts: return None
+        a, b = pts[0], pts[-1]
+    return (b / a - 1) * 100 if a else None
+
+
 def state_json():
     st = _state()
-    pf = Portfolio(st["portfolio"])
+    pfs = portfolio.load_portfolios(st)
+    portfolios = []
     positions = []
-    holdings_val = 0.0
-    for tk, p in pf.s["positions"].items():
-        px = price(tk); val = p["shares"] * px if px else None
-        if val: holdings_val += val
-        pnl = (val - p["cost_basis"]) if val is not None else None
-        positions.append({
-            "tk": tk, "name": p.get("name", ""), "researcher": p.get("researcher", ""),
-            "cost_basis": p["cost_basis"], "buy_price": p["legs"][0]["price"] if p["legs"] else None,
-            "cur": px, "value": val, "pnl": pnl,
-            "pnl_pct": (pnl / p["cost_basis"] * 100) if (pnl is not None and p["cost_basis"]) else None,
-            "legs": p["legs"], "challenges": p.get("challenges", {}),
-            "last_challenge": p.get("last_challenge"), "rec": p.get("rec"),
-            "verdict": p.get("verdict"), "thesis": p.get("thesis", ""),
-            "trend": p.get("trend", ""),
+    closed = []
+    combined_total = 0.0
+    for pf in pfs:
+        holdings_val = 0.0
+        for tk, p in pf.s["positions"].items():
+            px = price(tk); val = p["shares"] * px if px else None
+            if val: holdings_val += val
+            pnl = (val - p["cost_basis"]) if val is not None else None
+            positions.append({
+                "tk": tk, "name": p.get("name", ""), "researcher": p.get("researcher", ""),
+                "cost_basis": p["cost_basis"], "buy_price": p["legs"][0]["price"] if p["legs"] else None,
+                "cur": px, "value": val, "pnl": pnl,
+                "pnl_pct": (pnl / p["cost_basis"] * 100) if (pnl is not None and p["cost_basis"]) else None,
+                "legs": p["legs"], "challenges": p.get("challenges", {}),
+                "last_challenge": p.get("last_challenge"), "rec": p.get("rec"),
+                "verdict": p.get("verdict"), "thesis": p.get("thesis", ""),
+                "trend": p.get("trend", ""), "portfolio_id": pf.s["id"],
+            })
+        closed.extend({"tk": c["ticker"], "name": c.get("name", ""), "by": c.get("researcher", ""),
+                        "pnl": c["pnl"], "pnl_pct": c["pnl_pct"], "sell_reason": c.get("sell_reason", ""),
+                        "portfolio_id": pf.s["id"]}
+                       for c in pf.s.get("closed", []))
+        cash = pf.s.get("cash", 0.0); curve = pf.s.get("curve", [])
+        total = cash + holdings_val
+        combined_total += total
+        portfolios.append({
+            "id": pf.s["id"], "created": pf.s.get("created", ""),
+            "total": total, "invested": pf.invested_total(), "cash": cash,
+            "port_pct": _pct(curve), "benchmarks": {b: _pct(curve, b) for b in config.BENCHMARKS},
+            "curve": [c["value"] for c in curve][-120:],
+            "open_count": pf.open_count(), "max_open": config.MAX_OPEN_POSITIONS,
+            "accepts_new": pf.accepts_new(),
         })
-    cash = pf.s.get("cash", 0.0); curve = pf.s.get("curve", [])
-    def pct(key=None):
-        if not curve: return None
-        if key is None: a, b = curve[0]["value"], curve[-1]["value"]
-        else:
-            pts = [c["benchmarks"].get(key) for c in curve if c["benchmarks"].get(key)]
-            if not pts: return None
-            a, b = pts[0], pts[-1]
-        return (b / a - 1) * 100 if a else None
+    closed.sort(key=lambda c: c.get("portfolio_id", 0))
+    closed = closed[-40:]
     remaining = max(0, RUN["until"] - time.time()) if RUN["running"] else 0
     costs = store.load_costs()
     return {
         "run": {"running": RUN["running"], "cycles": RUN["cycles"],
                 "elapsed": int(time.time() - RUN["started"]) if RUN["started"] else 0,
                 "remaining": int(remaining), "interval": INTERVAL},
-        "portfolio": {"total": cash + holdings_val, "invested": pf.invested_total(),
-                      "cash": cash, "port_pct": pct(),
-                      "benchmarks": {b: pct(b) for b in config.BENCHMARKS},
-                      "curve": [c["value"] for c in curve][-120:],
-                      "round": pf.s.get("rounds", 1), "max_open": pf.max_open(),
-                      "open_count": pf.open_count()},
+        "portfolios": portfolios,
+        "combined_total": combined_total,
         "positions": positions,
-        "closed": [{"tk": c["ticker"], "name": c.get("name", ""), "by": c.get("researcher", ""),
-                    "pnl": c["pnl"], "pnl_pct": c["pnl_pct"], "sell_reason": c.get("sell_reason", "")}
-                   for c in pf.s.get("closed", [])[-20:]],
+        "closed": closed,
         "events": EVENTS[-400:],
         "researchers": [{"name": r["name"], "judge": r["judge"]} for r in config.RESEARCHERS],
         "costs": {"today": costs.get("daily", {}).get(str(date.today()), 0.0),
@@ -262,10 +289,13 @@ def price_history(tk):
 
 
 def ask_book(q):
-    st = _state(); pf = Portfolio(st["portfolio"])
-    rows = [f"{tk} ({p.get('researcher')}): invested ${p['cost_basis']:,.0f}. {p.get('thesis','')}"
-            for tk, p in pf.s["positions"].items()]
-    rows += [f"SOLD {c['ticker']}: {c['pnl_pct']:+.1f}%. {c.get('sell_reason','')}" for c in pf.s.get("closed", [])]
+    st = _state()
+    rows = []
+    for pf in portfolio.load_portfolios(st):
+        rows += [f"[portfolio {pf.s['id']}] {tk} ({p.get('researcher')}): invested ${p['cost_basis']:,.0f}. {p.get('thesis','')}"
+                 for tk, p in pf.s["positions"].items()]
+        rows += [f"[portfolio {pf.s['id']}] SOLD {c['ticker']}: {c['pnl_pct']:+.1f}%. {c.get('sell_reason','')}"
+                 for c in pf.s.get("closed", [])]
     book = "\n".join(rows) or "No positions yet."
     txt = llm._ask(f"You are the Research Lab assistant. Answer the owner's question about the portfolio, "
                    f"grounded ONLY in this book; concise, honest, not investment advice.\nBOOK:\n{book}\n\nQUESTION: {q}")
@@ -275,9 +305,9 @@ def ask_book(q):
 def research_trend(trend_text, rname):
     """Owner-suggested trend: find up to 3 stocks for it, judge and place each."""
     r = next((x for x in config.RESEARCHERS if x["name"].lower() == rname.lower()), config.RESEARCHERS[0])
-    st = _state(); pf = Portfolio(st["portfolio"])
+    st = _state()
     rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
-    avoid = pf.held_tickers() + rstate["proposed"][-40:]
+    avoid = portfolio.all_held_tickers(st) + rstate["proposed"][-40:]
     result = llm.research(r, avoid, trend_focus=trend_text)
     if result.get("_offline"):
         log("s", r["name"], f"Your trend '{trend_text}': live research unavailable.", "sys")
@@ -293,7 +323,7 @@ def research_trend(trend_text, rname):
         tk = (rec.get("ticker") or "").upper()
         rstate["proposed"].append(tk); avoid.append(tk)
         log("r", r["name"], f"[your trend: {trend_text}] {tk} \u2014 {rec.get('thesis','')}")
-        if _judge_and_place(st, pf, r, rec, trend_text, trend, bought_note=" from your trend"):
+        if _judge_and_place(st, r, rec, trend_text, trend, bought_note=" from your trend"):
             bought.append(tk)
     store.save(st)
     return f"{len(picks)} pick(s) reviewed" + (f", bought {', '.join(bought)}" if bought else "") + "."
@@ -301,13 +331,13 @@ def research_trend(trend_text, rname):
 
 def expand_trend(trend_id):
     """Find more stocks in a trend already on file — the 'find others' button."""
-    st = _state(); pf = Portfolio(st["portfolio"])
+    st = _state()
     trend = trends.get_by_id(st, trend_id)
     if trend is None:
         return "Trend not found."
     r = next((x for x in config.RESEARCHERS if x["name"] == trend["researcher"]), config.RESEARCHERS[0])
     rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
-    avoid = pf.held_tickers() + rstate["proposed"][-40:] + trends.seen_tickers(trend)
+    avoid = portfolio.all_held_tickers(st) + rstate["proposed"][-40:] + trends.seen_tickers(trend)
     result = llm.research(r, avoid, trend_focus=trend["text"])
     if result.get("_offline"):
         log("s", r["name"], f"Your trend '{trend['text']}': live research unavailable.", "sys")
@@ -321,7 +351,7 @@ def expand_trend(trend_id):
         tk = (rec.get("ticker") or "").upper()
         rstate["proposed"].append(tk); avoid.append(tk)
         log("r", r["name"], f"[more on: {trend['text']}] {tk} — {rec.get('thesis','')}")
-        if _judge_and_place(st, pf, r, rec, trend["text"], trend, bought_note=" from this trend"):
+        if _judge_and_place(st, r, rec, trend["text"], trend, bought_note=" from this trend"):
             bought.append(tk)
     store.save(st)
     return f"{len(picks)} new pick(s) reviewed" + (f", bought {', '.join(bought)}" if bought else "") + "."
@@ -329,7 +359,7 @@ def expand_trend(trend_id):
 
 def analyze_trend_stock(trend_id, ticker):
     """Owner points at a specific ticker to analyze under an existing trend."""
-    st = _state(); pf = Portfolio(st["portfolio"])
+    st = _state()
     trend = trends.get_by_id(st, trend_id)
     if trend is None:
         return "Trend not found."
@@ -344,7 +374,7 @@ def analyze_trend_stock(trend_id, ticker):
     log("r", r["name"], f"[your pick for: {trend['text']}] {ticker} — {rec.get('thesis','')}")
     rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
     rstate["proposed"].append(ticker)
-    bought = _judge_and_place(st, pf, r, rec, trend["text"], trend, bought_note=" from your pick")
+    bought = _judge_and_place(st, r, rec, trend["text"], trend, bought_note=" from your pick")
     store.save(st)
     return f"{ticker}: reviewed" + (", bought" if bought else "") + "."
 
@@ -352,39 +382,43 @@ def analyze_trend_stock(trend_id, ticker):
 def system_review():
     """Ask a fresh Claude call to audit this whole setup and suggest changes
     that could improve risk-adjusted returns — not just the current holdings."""
-    st = _state(); pf = Portfolio(st["portfolio"])
-    curve = pf.s.get("curve", [])
-    def pct(key=None):
-        if not curve: return None
-        if key is None: a, b = curve[0]["value"], curve[-1]["value"]
-        else:
-            pts = [c["benchmarks"].get(key) for c in curve if c["benchmarks"].get(key)]
-            if not pts: return None
-            a, b = pts[0], pts[-1]
-        return (b / a - 1) * 100 if a else None
-    closed = pf.s.get("closed", [])
-    wins = sum(1 for c in closed if c["pnl"] >= 0)
-    bench = ", ".join(f"{b} {(pct(b) or 0):+.1f}%" for b in config.BENCHMARKS)
-    holds = "; ".join(f"{tk} {p.get('researcher')} {p['challenges'].get('total',0)}x reviewed"
-                       for tk, p in pf.s["positions"].items()) or "none"
-    trades = "; ".join(f"{c['ticker']} {c['pnl_pct']:+.1f}% ({(c.get('sell_reason') or '')[:80]})"
-                        for c in closed[-15:]) or "none yet"
+    st = _state()
+    pfs = portfolio.load_portfolios(st)
+    combined_total = 0.0
+    portfolio_lines = []
+    for pf in pfs:
+        curve = pf.s.get("curve", [])
+        closed = pf.s.get("closed", [])
+        wins = sum(1 for c in closed if c["pnl"] >= 0)
+        bench = ", ".join(f"{b} {(_pct(curve, b) or 0):+.1f}%" for b in config.BENCHMARKS)
+        holds = "; ".join(f"{tk} {p.get('researcher')} {p['challenges'].get('total',0)}x reviewed"
+                           for tk, p in pf.s["positions"].items()) or "none"
+        trades = "; ".join(f"{c['ticker']} {c['pnl_pct']:+.1f}% ({(c.get('sell_reason') or '')[:80]})"
+                            for c in closed[-15:]) or "none yet"
+        total = pf.s.get("cash", 0) + pf.invested_total()
+        combined_total += total
+        portfolio_lines.append(
+            f"Portfolio {pf.s['id']} (started {pf.s.get('created','?')}"
+            f"{', closed to new names' if not pf.accepts_new() else ', still accepting new names'}): "
+            f"${total:,.0f} ({(_pct(curve) or 0):+.1f}% since inception vs {bench}). "
+            f"{pf.open_count()}/{config.MAX_OPEN_POSITIONS} open, {len(closed)} closed ({wins}/{len(closed)} profitable).\n"
+            f"  Open positions: {holds}\n  Recent closed trades: {trades}"
+        )
     summary = (
-        f"Total value ${pf.s.get('cash',0)+pf.invested_total():,.0f} "
-        f"({(pct() or 0):+.1f}% since inception vs {bench}). "
-        f"{pf.open_count()} open positions (round {pf.s.get('rounds',1)}, cap {pf.max_open()}), "
-        f"{len(closed)} closed ({wins}/{len(closed)} profitable).\n"
+        f"{len(pfs)} portfolio(s), ${combined_total:,.0f} combined.\n"
+        + "\n".join(portfolio_lines) + "\n"
         f"Config: initial position ${config.INITIAL_POSITION:,.0f}, add size ${config.ADD_SIZE:,.0f}, "
-        f"max position ${config.MAX_POSITION:,.0f}, {config.MAX_OPEN_POSITIONS} open positions per round "
-        f"(auto-starts a new round with a fresh ${config.CASH_BUDGET:,.0f} once full), "
+        f"max position ${config.MAX_POSITION:,.0f}, {config.MAX_OPEN_POSITIONS} names per portfolio "
+        f"(a new ${config.CASH_BUDGET:,.0f} portfolio starts once the current one fills up), "
         f"each holding reviewed at most once/day.\n"
-        f"Researchers: " + "; ".join(f"{r['name']} ({r['judge']}): {r['style']}" for r in config.RESEARCHERS) + "\n"
-        f"Open positions: {holds}\nRecent closed trades: {trades}"
+        f"Researchers: " + "; ".join(f"{r['name']} ({r['judge']}): {r['style']}" for r in config.RESEARCHERS)
     )
     prompt = (
         "You are an outside quant/portfolio-strategy consultant auditing this automated "
         "paper-trading research system (two LLM researchers, each with a skeptical LLM judge, "
-        "picking Robinhood-buyable US stocks of any market cap). Here is its current state:\n\n"
+        "picking Robinhood-buyable US stocks of any market cap, split across multiple independent "
+        "~30-name portfolios so each batch's performance can be judged on its own). "
+        "Here is its current state:\n\n"
         + summary +
         "\n\nGive concrete, prioritized suggestions to improve risk-adjusted returns going "
         "forward: sizing/diversification, review cadence, what in this exact setup is "
@@ -478,13 +512,9 @@ h4{font-size:11px;text-transform:uppercase;color:var(--mut);margin:13px 0 3px} s
 <div class='mut' style='margin:4px 0 12px' id='runline'></div>
 <div class='warn'>\u26a0\ufe0f Running spends your Anthropic credit (each cycle = AI + web search). Watch the cycle count; your Console spend cap is the backstop. Paper only \u2014 no real orders, not investment advice.</div>
 
-<div class='card'><h3>Portfolio \u00b7 paper</h3>
-<span class='stat'><span class='mut'>Total</span><br><span class='big' id='p_total'>\u2014</span></span>
-<span class='stat'><span class='mut'>Invested</span><br><span class='big' id='p_inv'>\u2014</span></span>
-<span class='stat'><span class='mut'>Cash</span><br><span class='big' id='p_cash'>\u2014</span></span>
-<span class='stat'><span class='mut'>vs market</span><br><span class='big' id='p_pct'>\u2014</span></span>
-<span class='stat'><span class='mut'>AI cost today</span><br><span class='big' id='p_cost'>\u2014</span></span>
-<div class='mut' id='p_bench' style='margin-top:6px'></div><div id='chart'></div></div>
+<div class='card'><h3>Portfolios \u00b7 paper</h3>
+<p class='mut' style='margin-top:0' id='p_summary'>\u2014</p>
+<div id='portfolios'></div></div>
 
 <div class='card'><div class='card-head' onclick='toggleFeed()'><h3>Live conversation</h3><span class='chev' id='feedChev'>▼</span></div>
 <div class='tabs' id='feedTabs'></div><div class='feed' id='feed'></div></div>
@@ -540,22 +570,31 @@ async function poll(){try{STATE=await (await fetch(BASE+'/api/state')).json();re
 function render(s){const r=s.run;
  $('status').innerHTML="<span class='dot "+(r.running?'on':'off')+"'></span>"+(r.running?'running':'stopped');
  $('runline').textContent=r.running?('cycle '+r.cycles+' \u00b7 running '+Math.floor(r.elapsed/60)+'m \u00b7 auto-stops in '+Math.floor(r.remaining/3600)+'h'+Math.floor(r.remaining%3600/60)+'m'):(r.cycles?('stopped after '+r.cycles+' cycles'):'idle \u2014 press Go');
- const p=s.portfolio; $('p_total').textContent=fmt(p.total);$('p_inv').textContent=fmt(p.invested);$('p_cash').textContent=fmt(p.cash);
- $('p_pct').textContent=pc(p.port_pct); $('p_pct').className='big '+((p.port_pct||0)>=0?'up':'dn');
- const costs=s.costs||{today:0,total:0};
- $('p_cost').textContent='$'+costs.today.toFixed(2);
- $('p_bench').textContent='since inception, vs '+Object.entries(p.benchmarks).map(([k,v])=>k+' '+pc(v)).join(' \u00b7 ')+' \u00b7 lifetime AI cost $'+costs.total.toFixed(2)+' \u00b7 round '+p.round+' ('+p.open_count+'/'+p.max_open+' positions)';
- $('chart').innerHTML=chart(p.curve);
+ const costs=s.costs||{today:0,total:0}; const pfs=s.portfolios||[];
+ $('p_summary').textContent=pfs.length+' portfolio'+(pfs.length===1?'':'s')+' \u00b7 combined '+fmt(s.combined_total)+' \u00b7 AI cost today $'+costs.today.toFixed(2)+' \u00b7 lifetime $'+costs.total.toFixed(2);
+ $('portfolios').innerHTML=pfs.length?pfs.map(p=>{
+   const badge=p.accepts_new?"<span class='up' style='font-size:11px'>accepting new</span>":"<span class='mut' style='font-size:11px'>closed to new</span>";
+   return "<div class='pos' style='margin-bottom:10px'>"+
+     "<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:6px'>"+
+       "<b>Portfolio "+p.id+"</b><span class='mut'>started "+p.created+"</span>"+badge+"</div>"+
+     "<span class='stat'><span class='mut'>Total</span><br><span class='big'>"+fmt(p.total)+"</span></span>"+
+     "<span class='stat'><span class='mut'>Invested</span><br><span class='big'>"+fmt(p.invested)+"</span></span>"+
+     "<span class='stat'><span class='mut'>Cash</span><br><span class='big'>"+fmt(p.cash)+"</span></span>"+
+     "<span class='stat'><span class='mut'>vs market</span><br><span class='big "+((p.port_pct||0)>=0?'up':'dn')+"'>"+pc(p.port_pct)+"</span></span>"+
+     "<span class='stat'><span class='mut'>Positions</span><br><span class='big'>"+p.open_count+"/"+p.max_open+"</span></span>"+
+     "<div class='mut' style='margin-top:6px'>since inception, vs "+Object.entries(p.benchmarks).map(([k,v])=>k+' '+pc(v)).join(' \u00b7 ')+"</div>"+
+     "<div style='margin-top:8px'>"+chart(p.curve)+"</div></div>";
+ }).join(''):"<span class='mut'>No portfolio yet \u2014 press Go and one starts automatically.</span>";
  buildFeedTabs(s.researchers); renderFeed();
  $('positions').innerHTML=s.positions.length?s.positions.map((x,i)=>{
    const legs=x.legs.map(l=>'$'+Math.round(l.amount).toLocaleString()+'@$'+l.price).join(' + ');const ch=x.challenges||{};
-   return "<div class='pos'><b>"+x.tk+"</b> <span class='mut'>"+x.name+" \u00b7 "+x.researcher+"</span>"+
+   return "<div class='pos'><b>"+x.tk+"</b> <span class='mut'>P"+x.portfolio_id+" \u00b7 "+x.name+" \u00b7 "+x.researcher+"</span>"+
      "<div class='mut'>Bought $"+(x.buy_price||'\u2014')+" \u2192 $"+(x.cur?x.cur.toFixed(2):'\u2014')+" <span class='"+((x.pnl_pct||0)>=0?'up':'dn')+"'>"+pc(x.pnl_pct)+"</span></div>"+
      "<div class='mut'>Invested "+fmt(x.cost_basis)+" ["+legs+"] \u2192 value "+fmt(x.value)+" \u00b7 challenged "+(ch.total||0)+"\u00d7 (held "+(ch.held||0)+", added "+(ch.added||0)+")</div>"+
      "<div style='margin-top:6px'>"+((x.rec||x.verdict)?"<button class='mini' onclick='rep("+i+")'>report \u25b8</button> ":"")+"<button class='mini' onclick='chartOf(\\""+x.tk+"\\")'>chart \u25b8</button></div></div>";
  }).join(''):"<span class='mut'>No open positions yet \u2014 press Go and watch them appear.</span>";
  $('closed').innerHTML=s.closed.length?"<table>"+s.closed.slice().reverse().map(c=>
-   "<tr><td><b>"+c.tk+"</b> <span class='mut'>"+c.by+"</span></td><td class='"+(c.pnl>=0?'up':'dn')+"'>"+pc(c.pnl_pct)+" ($"+Math.round(c.pnl).toLocaleString()+")</td><td class='mut'>"+(c.sell_reason||'').slice(0,90)+"</td></tr>").join('')+"</table>":"<span class='mut'>none yet</span>";
+   "<tr><td><b>"+c.tk+"</b> <span class='mut'>P"+c.portfolio_id+" \u00b7 "+c.by+"</span></td><td class='"+(c.pnl>=0?'up':'dn')+"'>"+pc(c.pnl_pct)+" ($"+Math.round(c.pnl).toLocaleString()+")</td><td class='mut'>"+(c.sell_reason||'').slice(0,90)+"</td></tr>").join('')+"</table>":"<span class='mut'>none yet</span>";
  renderTrends(s.trends);
 }
 let TRENDS_OPEN=new Set(), TREND_MSG={};
