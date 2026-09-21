@@ -29,14 +29,18 @@ def _portfolio_lines(pf) -> list[str]:
     s = pf.s
     pos = s["positions"]; closed = s["closed"]; curve = s["curve"]
     invested = pf.invested_total()
-    port_ret = _pct_vs_start(curve)
+    total = curve[-1]["value"] if curve else (s.get("cash", 0) + invested)
+    pnl_dollar = total - config.CASH_BUDGET
+    invested_ever = pf.invested_ever()
+    port_ret = (pnl_dollar / invested_ever * 100) if invested_ever else None
     L = [f"**Portfolio {s['id']}** (started {s.get('created','?')}"
          f"{', closed to new names' if not pf.accepts_new() else ''}): "
          f"{len(pos)}/{config.MAX_OPEN_POSITIONS} open, {len(closed)} closed. "
          f"${invested:,.0f} invested, ${s['cash']:,.0f} cash."]
     if port_ret is not None:
         bench = " · ".join(f"{b} {(_pct_vs_start(curve, b) or 0):+.1f}%" for b in config.BENCHMARKS)
-        L.append(f"{port_ret:+.1f}% since inception vs {bench}.")
+        sign = "+" if pnl_dollar >= 0 else "-"
+        L.append(f"{port_ret:+.1f}% on invested capital ({sign}${abs(pnl_dollar):,.0f}) since inception vs {bench} index return.")
     if pos:
         L.append(f"Holding: {', '.join(sorted(pos.keys()))}.")
     if closed:

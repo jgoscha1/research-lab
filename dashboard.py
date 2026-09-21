@@ -224,6 +224,19 @@ def _pct(curve, key=None):
     return (b / a - 1) * 100 if a else None
 
 
+def _invested_pct(pf, total=None):
+    """% return based on capital actually invested, not the whole starting
+    budget — so a portfolio that's still slowly deploying cash isn't
+    shown as flat just because most of its $ is still sitting idle."""
+    if total is None:
+        curve = pf.s.get("curve", [])
+        total = curve[-1]["value"] if curve else (pf.s.get("cash", 0) + pf.invested_total())
+    invested_ever = pf.invested_ever()
+    if not invested_ever:
+        return None
+    return (total - config.CASH_BUDGET) / invested_ever * 100
+
+
 def _bench_dollar_series(curve, key, base_value):
     """Forward-filled benchmark index level for `key`, rescaled so it starts
     at base_value — the same starting dollar amount as the portfolio curve —
@@ -280,7 +293,7 @@ def state_json():
             "id": pf.s["id"], "created": pf.s.get("created", ""),
             "total": total, "invested": pf.invested_total(), "cash": cash,
             "pnl_dollar": total - config.CASH_BUDGET,
-            "port_pct": _pct(curve), "benchmarks": {b: _pct(curve, b) for b in config.BENCHMARKS},
+            "port_pct": _invested_pct(pf, total), "benchmarks": {b: _pct(curve, b) for b in config.BENCHMARKS},
             "curve": window, "bench_curves": bench_curves,
             "open_count": pf.open_count(), "max_open": config.MAX_OPEN_POSITIONS,
             "accepts_new": pf.accepts_new(),
@@ -431,12 +444,13 @@ def system_review():
                            for tk, p in pf.s["positions"].items()) or "none"
         trades = "; ".join(f"{c['ticker']} {c['pnl_pct']:+.1f}% ({(c.get('sell_reason') or '')[:80]})"
                             for c in closed[-15:]) or "none yet"
-        total = pf.s.get("cash", 0) + pf.invested_total()
+        total = curve[-1]["value"] if curve else (pf.s.get("cash", 0) + pf.invested_total())
         combined_total += total
+        port_pct = _invested_pct(pf, total)
         portfolio_lines.append(
             f"Portfolio {pf.s['id']} (started {pf.s.get('created','?')}"
             f"{', closed to new names' if not pf.accepts_new() else ', still accepting new names'}): "
-            f"${total:,.0f} ({(_pct(curve) or 0):+.1f}% since inception vs {bench}). "
+            f"${total:,.0f} ({(port_pct or 0):+.1f}% on invested capital vs {bench} index return). "
             f"{pf.open_count()}/{config.MAX_OPEN_POSITIONS} open, {len(closed)} closed ({wins}/{len(closed)} profitable).\n"
             f"  Open positions: {holds}\n  Recent closed trades: {trades}"
         )
@@ -638,7 +652,7 @@ function render(s){const r=s.run;
      "<span class='stat'><span class='mut'>Total</span><br><span class='big'>"+fmt(p.total)+"</span></span>"+
      "<span class='stat'><span class='mut'>Invested</span><br><span class='big'>"+fmt(p.invested)+"</span></span>"+
      "<span class='stat'><span class='mut'>Cash</span><br><span class='big'>"+fmt(p.cash)+"</span></span>"+
-     "<span class='stat'><span class='mut'>P&amp;L</span><br><span class='big "+((p.pnl_dollar||0)>=0?'up':'dn')+"'>"+fmtSigned(p.pnl_dollar)+"</span><br><span class='mut'>"+pc(p.port_pct)+"</span></span>"+
+     "<span class='stat'><span class='mut'>P&amp;L</span><br><span class='big "+((p.pnl_dollar||0)>=0?'up':'dn')+"'>"+fmtSigned(p.pnl_dollar)+"</span><br><span class='mut'>"+pc(p.port_pct)+" on invested</span></span>"+
      "<span class='stat'><span class='mut'>Positions</span><br><span class='big'>"+p.open_count+"/"+p.max_open+"</span></span>"+
      "<div class='mut' style='margin-top:6px'>since inception, vs "+Object.entries(p.benchmarks).map(([k,v])=>k+' '+pc(v)).join(' \u00b7 ')+"</div>"+
      "<div style='margin-top:8px'>"+multiChart([{vals:p.curve,color:'#60a5fa',label:'Portfolio'}].concat(

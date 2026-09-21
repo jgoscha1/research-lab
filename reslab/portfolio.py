@@ -150,6 +150,13 @@ class Portfolio:
     def invested_total(self):
         return sum(p["cost_basis"] for p in self.s["positions"].values())
 
+    def invested_ever(self):
+        """Every dollar this portfolio has ever put into a buy (open
+        positions' cost basis + the cost basis of everything since sold,
+        whole or partial) — the right denominator for a % return that
+        isn't diluted by cash still sitting on the sidelines."""
+        return self.invested_total() + sum(c.get("cost_basis", 0) for c in self.s.get("closed", []))
+
 
 # --------------------------------------------------------------------------- #
 # Multi-portfolio bookkeeping. These operate on the top-level state dict
