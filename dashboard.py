@@ -96,10 +96,11 @@ def _judge_and_place(st, pf, r, rec, trend_text, trend, bought_note=""):
         log("s", r["name"], f"{tk}: {verdict['decision']} — not bought.", "sys")
         trends.record_stock(trend, rec, STATUS_MAP.get(verdict["decision"], verdict["decision"]), verdict.get("reasoning", ""))
         return False
-    if pf.open_count() >= config.MAX_OPEN_POSITIONS:
-        log("s", r["name"], f"{tk}: accepted, but at max open positions — not bought.", "sys")
-        trends.record_stock(trend, rec, "watch", verdict.get("reasoning", ""))
-        return False
+    if pf.at_cap():
+        pf.start_new_round()
+        log("s", "", f"\U0001f4c8 Portfolio full at {pf.max_open() - config.MAX_OPEN_POSITIONS} names — "
+                     f"starting round {pf.s['rounds']} with a fresh ${config.CASH_BUDGET:,.0f} "
+                     f"(cap now {pf.max_open()}).", "sys")
     px = elig["price"] or price(tk)
     if px and pf.buy(tk, rec.get("name", tk), r["name"], rec.get("thesis", ""), px, config.INITIAL_POSITION):
         p = pf.position(tk); p["rec"] = rec; p["verdict"] = verdict; p["trend"] = trend_text
@@ -140,27 +141,22 @@ def one_cycle(cyc):
         else:
             pos["challenges"]["held"] += 1
     else:
-        if pf.open_count() >= config.MAX_OPEN_POSITIONS:
-            log("s", r["name"], "At max open positions — reviewing only.", "sys")
-        else:
-            rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
-            avoid = pf.held_tickers() + rstate["proposed"][-40:]
-            result = llm.research(r, avoid)
-            if result.get("_offline"):
-                log("s", r["name"], "Live research unavailable (set ANTHROPIC_API_KEY).", "sys")
-                store.save(st); return
-            trend_text = result["trend"]
-            trend = trends.get_or_create(st, r["name"], trend_text, origin="auto")
-            log("r", r["name"], f"Trend: {trend_text}")
-            for rec in result["picks"][:3]:
-                tk = (rec.get("ticker") or "").upper()
-                if not tk or tk in avoid:
-                    continue
-                rstate["proposed"].append(tk); avoid.append(tk)
-                log("r", r["name"], f"{tk} — {rec.get('thesis','')}")
-                _judge_and_place(st, pf, r, rec, trend_text, trend)
-                if pf.open_count() >= config.MAX_OPEN_POSITIONS:
-                    break
+        rstate = st["researchers"].setdefault(r["name"], {"proposed": []})
+        avoid = pf.held_tickers() + rstate["proposed"][-40:]
+        result = llm.research(r, avoid)
+        if result.get("_offline"):
+            log("s", r["name"], "Live research unavailable (set ANTHROPIC_API_KEY).", "sys")
+            store.save(st); return
+        trend_text = result["trend"]
+        trend = trends.get_or_create(st, r["name"], trend_text, origin="auto")
+        log("r", r["name"], f"Trend: {trend_text}")
+        for rec in result["picks"][:3]:
+            tk = (rec.get("ticker") or "").upper()
+            if not tk or tk in avoid:
+                continue
+            rstate["proposed"].append(tk); avoid.append(tk)
+            log("r", r["name"], f"{tk} — {rec.get('thesis','')}")
+            _judge_and_place(st, pf, r, rec, trend_text, trend)
 
     prices = {t: price(t) for t in pf.held_tickers()}
     prices = {t: p for t, p in prices.items() if p}
@@ -238,7 +234,9 @@ def state_json():
         "portfolio": {"total": cash + holdings_val, "invested": pf.invested_total(),
                       "cash": cash, "port_pct": pct(),
                       "benchmarks": {b: pct(b) for b in config.BENCHMARKS},
-                      "curve": [c["value"] for c in curve][-120:]},
+                      "curve": [c["value"] for c in curve][-120:],
+                      "round": pf.s.get("rounds", 1), "max_open": pf.max_open(),
+                      "open_count": pf.open_count()},
         "positions": positions,
         "closed": [{"tk": c["ticker"], "name": c.get("name", ""), "by": c.get("researcher", ""),
                     "pnl": c["pnl"], "pnl_pct": c["pnl_pct"], "sell_reason": c.get("sell_reason", "")}
@@ -374,10 +372,12 @@ def system_review():
     summary = (
         f"Total value ${pf.s.get('cash',0)+pf.invested_total():,.0f} "
         f"({(pct() or 0):+.1f}% since inception vs {bench}). "
-        f"{pf.open_count()} open positions, {len(closed)} closed ({wins}/{len(closed)} profitable).\n"
+        f"{pf.open_count()} open positions (round {pf.s.get('rounds',1)}, cap {pf.max_open()}), "
+        f"{len(closed)} closed ({wins}/{len(closed)} profitable).\n"
         f"Config: initial position ${config.INITIAL_POSITION:,.0f}, add size ${config.ADD_SIZE:,.0f}, "
-        f"max position ${config.MAX_POSITION:,.0f}, max open positions {config.MAX_OPEN_POSITIONS}, "
-        f"cash budget ${config.CASH_BUDGET:,.0f}, each holding reviewed at most once/day.\n"
+        f"max position ${config.MAX_POSITION:,.0f}, {config.MAX_OPEN_POSITIONS} open positions per round "
+        f"(auto-starts a new round with a fresh ${config.CASH_BUDGET:,.0f} once full), "
+        f"each holding reviewed at most once/day.\n"
         f"Researchers: " + "; ".join(f"{r['name']} ({r['judge']}): {r['style']}" for r in config.RESEARCHERS) + "\n"
         f"Open positions: {holds}\nRecent closed trades: {trades}"
     )
@@ -539,7 +539,7 @@ function render(s){const r=s.run;
  $('p_pct').textContent=pc(p.port_pct); $('p_pct').className='big '+((p.port_pct||0)>=0?'up':'dn');
  const costs=s.costs||{today:0,total:0};
  $('p_cost').textContent='$'+costs.today.toFixed(2);
- $('p_bench').textContent='since inception, vs '+Object.entries(p.benchmarks).map(([k,v])=>k+' '+pc(v)).join(' \u00b7 ')+' \u00b7 lifetime AI cost $'+costs.total.toFixed(2);
+ $('p_bench').textContent='since inception, vs '+Object.entries(p.benchmarks).map(([k,v])=>k+' '+pc(v)).join(' \u00b7 ')+' \u00b7 lifetime AI cost $'+costs.total.toFixed(2)+' \u00b7 round '+p.round+' ('+p.open_count+'/'+p.max_open+' positions)';
  $('chart').innerHTML=chart(p.curve);
  buildFeedTabs(s.researchers); renderFeed();
  $('positions').innerHTML=s.positions.length?s.positions.map((x,i)=>{

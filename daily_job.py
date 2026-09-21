@@ -66,8 +66,9 @@ def run():
     status_map = {"reject": "rejected", "watch": "watch"}
     for r in config.RESEARCHERS:
         rstate = state["researchers"].setdefault(r["name"], {"proposed": []})
-        if pf.open_count() >= config.MAX_OPEN_POSITIONS:
-            break
+        if pf.at_cap():
+            pf.start_new_round()
+            events.append(f"Portfolio full — starting round {pf.s['rounds']} with a fresh ${config.CASH_BUDGET:,.0f} (cap now {pf.max_open()}).")
         avoid = pf.held_tickers() + rstate["proposed"][-40:]
         for _ in range(config.NEW_IDEAS_PER_DAY):
             result = llm.research(r, avoid)
@@ -91,10 +92,10 @@ def run():
                 if verdict["decision"] != "accept":
                     events.append(f"{r['name']} → {tk}: {verdict['decision']} — {r['judge']}: {verdict.get('reasoning','')[:160]}")
                     trends.record_stock(trend, rec, status_map.get(verdict["decision"], verdict["decision"]), verdict.get("reasoning", ""))
-                elif pf.open_count() >= config.MAX_OPEN_POSITIONS:
-                    events.append(f"{r['name']} → {tk}: accepted, but at max open positions — not bought.")
-                    trends.record_stock(trend, rec, "watch", verdict.get("reasoning", ""))
                 else:
+                    if pf.at_cap():
+                        pf.start_new_round()
+                        events.append(f"Portfolio full — starting round {pf.s['rounds']} with a fresh ${config.CASH_BUDGET:,.0f} (cap now {pf.max_open()}).")
                     price = elig["price"] or market.last_price(tk)
                     if price and pf.buy(tk, rec.get("name", tk), r["name"], rec.get("thesis", ""), price, config.INITIAL_POSITION):
                         p = pf.position(tk); p["verdict"] = verdict; p["trend"] = trend_text

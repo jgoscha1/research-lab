@@ -25,7 +25,8 @@ def summary(pf) -> str:
     invested = pf.invested_total()
     port_ret = _pct_vs_start(curve)
     L = []
-    L.append(f"{len(pos)} open position(s), {len(closed)} closed. "
+    rounds = s.get("rounds", 1)
+    L.append(f"{len(pos)}/{pf.max_open()} open position(s) (round {rounds}), {len(closed)} closed. "
              f"${invested:,.0f} invested, ${s['cash']:,.0f} cash.")
     if port_ret is not None:
         bench = " · ".join(f"{b} {(_pct_vs_start(curve, b) or 0):+.1f}%" for b in config.BENCHMARKS)
@@ -37,7 +38,7 @@ def summary(pf) -> str:
     if closed:
         wins = sum(1 for c in closed if c["pnl"] >= 0)
         L.append(f"Closed trades: {wins}/{len(closed)} profitable.")
-    L.append('"Small-cap" and Robinhood-buyable only (major US exchanges, no OTC). '
+    L.append("Any Robinhood-buyable US stock, any market cap (major US exchanges, no OTC). "
              "No real orders are placed; this is paper research.")
     return "\n".join("- " + x for x in L)
 
