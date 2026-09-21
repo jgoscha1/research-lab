@@ -288,7 +288,7 @@ def price_history(tk):
             "prices": [round(float(x), 2) for x in s.values]}
 
 
-def ask_book(q):
+def ask_book(q, history=None):
     st = _state()
     rows = []
     for pf in portfolio.load_portfolios(st):
@@ -297,8 +297,14 @@ def ask_book(q):
         rows += [f"[portfolio {pf.s['id']}] SOLD {c['ticker']}: {c['pnl_pct']:+.1f}%. {c.get('sell_reason','')}"
                  for c in pf.s.get("closed", [])]
     book = "\n".join(rows) or "No positions yet."
+    convo = ""
+    if history:
+        turns = "\n".join(f"{'Owner' if h.get('role') == 'user' else 'Assistant'}: {h.get('text','')}"
+                           for h in history[-10:] if h.get("text"))
+        if turns:
+            convo = f"\n\nConversation so far:\n{turns}\n"
     txt = llm._ask(f"You are the Research Lab assistant. Answer the owner's question about the portfolio, "
-                   f"grounded ONLY in this book; concise, honest, not investment advice.\nBOOK:\n{book}\n\nQUESTION: {q}")
+                   f"grounded ONLY in this book; concise, honest, not investment advice.\nBOOK:\n{book}{convo}\n\nQUESTION: {q}")
     return txt or "Live AI unavailable \u2014 check ANTHROPIC_API_KEY."
 
 
@@ -463,7 +469,7 @@ class H(BaseHTTPRequestHandler):
         if rp is None: return self._send(404, "not found", "text/plain")
         ln = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(ln) or "{}")
-        if rp == "/api/ask": return self._send(200, json.dumps({"answer": ask_book(data.get("q", ""))}))
+        if rp == "/api/ask": return self._send(200, json.dumps({"answer": ask_book(data.get("q", ""), data.get("history"))}))
         if rp == "/api/trend": return self._send(200, json.dumps({"result": research_trend(data.get("trend", ""), data.get("researcher", "Ada"))}))
         if rp == "/api/trend/expand": return self._send(200, json.dumps({"result": expand_trend(data.get("trend_id"))}))
         if rp == "/api/trend/stock": return self._send(200, json.dumps({"result": analyze_trend_stock(data.get("trend_id"), data.get("ticker", ""))}))
@@ -497,6 +503,7 @@ button:hover{border-color:var(--mut)} .go{background:var(--up);color:#06210f;bor
 .tab{font-size:11px;padding:4px 10px;opacity:.55} .tab.active{opacity:1;border-color:var(--mut);background:#1c2029}
 .m{max-width:90%;padding:7px 10px;border-radius:11px;font-size:13px;white-space:pre-wrap}
 .m.r{align-self:flex-start;background:#12203a} .m.j{align-self:flex-end;background:#2a2010} .m.s{align-self:center;color:var(--mut);font-size:12px;background:transparent}
+.m.u{align-self:flex-end;background:#1c2029} .m.a{align-self:flex-start;background:#12203a}
 .who{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--mut);margin-bottom:2px}
 table{width:100%;border-collapse:collapse;font-size:13px} td{padding:7px 5px;border-bottom:1px solid var(--ln);vertical-align:top}
 input{width:100%;font:inherit;font-size:13px;color:var(--ink);background:var(--bg);border:1px solid var(--ln);border-radius:9px;padding:8px 10px;margin-bottom:8px}
@@ -525,8 +532,10 @@ h4{font-size:11px;text-transform:uppercase;color:var(--mut);margin:13px 0 3px} s
 <div id='trendsBody'><p class='mut' style='margin-top:0'>Every macro/industry trend a researcher has looked at, and each stock reviewed within it. Click one to expand.</p>
 <div id='trends'></div></div></div>
 
-<div class='card'><h3>Ask the lab</h3><input id='askin' placeholder='e.g. which holding is up the most, and why?'>
-<button class='mini' onclick='ask()'>Ask</button><div id='askout' class='mut' style='margin-top:8px'></div></div>
+<div class='card'><h3>Ask the lab</h3>
+<div class='feed' id='askchat' style='max-height:280px;margin-bottom:10px'></div>
+<input id='askin' placeholder='e.g. which holding is up the most, and why?' onkeydown='if(event.key==="Enter")ask()'>
+<button class='mini' onclick='ask()'>Ask</button></div>
 <div class='card'><h3>Suggest a trend</h3><p class='mut' style='margin-top:0'>The researcher will find 1-3 stocks that benefit from it.</p>
 <input id='trendin' placeholder='e.g. undersea cables, water scarcity\u2026'>
 <button class='mini' onclick='trend("Ada")'>Send to Ada</button> <button class='mini' onclick='trend("Boone")'>Send to Boone</button>
@@ -647,8 +656,17 @@ function cls(){$('ov').classList.remove('open');}
 $('ov').addEventListener('click',e=>{if(e.target.id==='ov')cls();});
 $('go').onclick=()=>{fetch(BASE+'/api/go');$('runline').textContent='starting\u2026';};
 $('stop').onclick=()=>{fetch(BASE+'/api/stop');};
-async function ask(){const q=$('askin').value.trim();if(!q)return;$('askout').textContent='thinking\u2026';
- const r=await (await fetch(BASE+'/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q})})).json();$('askout').textContent=r.answer;}
+let ASK_HISTORY=[];
+function renderAskChat(){const el=$('askchat'); if(!el)return;
+ el.innerHTML=ASK_HISTORY.map(h=>"<div class='m "+(h.role==='user'?'u':'a')+"'>"+
+   h.text.replace(/&/g,'&amp;').replace(/</g,'&lt;')+"</div>").join('');
+ el.scrollTop=el.scrollHeight;}
+async function ask(){const q=$('askin').value.trim();if(!q)return;$('askin').value='';
+ ASK_HISTORY.push({role:'user',text:q}); renderAskChat();
+ const hist=ASK_HISTORY.slice(0,-1);
+ const pending={role:'assistant',text:'thinking\u2026'}; ASK_HISTORY.push(pending); renderAskChat();
+ const r=await (await fetch(BASE+'/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q,history:hist})})).json();
+ pending.text=r.answer; renderAskChat();}
 async function trend(who){const t=$('trendin').value.trim();if(!t)return;$('trendout').textContent=who+' is researching "'+t+'"\u2026';
  const r=await (await fetch(BASE+'/api/trend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trend:t,researcher:who})})).json();$('trendout').textContent=r.result+' (see the conversation feed)';}
 async function review(){$('reviewout').textContent='auditing the system\u2026 this can take a minute (live web research)\u2026';
