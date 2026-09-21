@@ -59,6 +59,12 @@ def run():
                 if d["action"] == "sell":
                     rec = pf.sell(tk, price, d.get("reasoning", "Judge: sell"))
                     if rec: events.append(f"SOLD {tk} (portfolio {pf.s['id']}) {rec['pnl_pct']:+.1f}% (${rec['pnl']:+,.0f}) — {rec['sell_reason']}")
+                elif d["action"] == "trim" and price:
+                    frac = max(1, min(90, int(d.get("trim_pct") or 50))) / 100.0
+                    rec = pf.sell(tk, price, d.get("reasoning", "Judge: trim"), fraction=frac)
+                    if rec:
+                        pos["challenges"]["trimmed"] = pos["challenges"].get("trimmed", 0) + 1
+                        events.append(f"TRIMMED {int(frac*100)}% of {tk} (portfolio {pf.s['id']}) {rec['pnl_pct']:+.1f}% (${rec['pnl']:+,.0f}) — {rec['sell_reason']}")
                 elif d["action"] == "add" and pf.can_add(tk, config.ADD_SIZE):
                     if pf.buy(tk, pos["name"], r["name"], pos["thesis"], price, config.ADD_SIZE):
                         pos["challenges"]["added"] += 1
