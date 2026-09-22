@@ -52,7 +52,32 @@ def get_daily(ticker: str, period: str = "13mo") -> pd.DataFrame:
     return pd.DataFrame(columns=["close"])
 
 
+def _live_quote(ticker: str) -> float | None:
+    """A live/near-live quote, when yfinance has one — this can be far
+    fresher than the daily-bar download, which has been observed to lag
+    the actual trading session by a day or more (e.g. Friday's close still
+    showing up as "current" on Monday evening)."""
+    try:
+        fi = _yf().Ticker(ticker).fast_info
+        p = fi.get("lastPrice")
+        if p:
+            return float(p)
+    except Exception:
+        pass
+    try:
+        info = _yf().Ticker(ticker).info or {}
+        p = info.get("currentPrice") or info.get("regularMarketPrice")
+        if p:
+            return float(p)
+    except Exception:
+        pass
+    return None
+
+
 def last_price(ticker: str) -> float | None:
+    p = _live_quote(ticker)
+    if p is not None:
+        return p
     df = get_daily(ticker, period="5d")
     return float(df["close"].iloc[-1]) if len(df) else None
 
