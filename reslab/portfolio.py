@@ -14,13 +14,11 @@ another instead of one number blurring them all together.
 """
 from __future__ import annotations
 
-from datetime import date
-
 from . import config
 
 
 def _today():
-    return str(date.today())
+    return config.today_str()
 
 
 def _new_portfolio_dict(pid: int) -> dict:

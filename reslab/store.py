@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from datetime import date, datetime
+from datetime import datetime
 
 from . import config
 
@@ -58,7 +58,7 @@ def add_cost(usd: float) -> dict:
     if not usd:
         return load_costs()
     costs = load_costs()
-    key = date.today().isoformat()
+    key = config.today_str()
     costs["total"] = costs.get("total", 0.0) + usd
     costs.setdefault("daily", {})
     costs["daily"][key] = costs["daily"].get(key, 0.0) + usd

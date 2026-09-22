@@ -7,7 +7,7 @@ both write into the same list in state.
 """
 from __future__ import annotations
 
-from datetime import date
+from . import config
 
 
 def find(state: dict, researcher: str, text: str) -> dict | None:
@@ -32,7 +32,7 @@ def get_or_create(state: dict, researcher: str, text: str, origin: str) -> dict:
         return t
     trends = state.setdefault("trends", [])
     t = {"id": (trends[-1]["id"] + 1) if trends else 1, "text": text,
-         "researcher": researcher, "origin": origin, "created": str(date.today()),
+         "researcher": researcher, "origin": origin, "created": config.today_str(),
          "stocks": []}
     trends.append(t)
     return t
@@ -46,12 +46,12 @@ def record_stock(trend: dict, rec: dict, status: str, reasoning: str = ""):
     for s in trend["stocks"]:
         if s["tk"] == tk:
             s.update(status=status, reasoning=reasoning, thesis=rec.get("thesis", ""),
-                      conviction=rec.get("conviction", ""), date=str(date.today()))
+                      conviction=rec.get("conviction", ""), date=config.today_str())
             return
     trend["stocks"].append({
         "tk": tk, "name": rec.get("name", ""), "thesis": rec.get("thesis", ""),
         "conviction": rec.get("conviction", ""), "status": status,
-        "reasoning": reasoning, "date": str(date.today()),
+        "reasoning": reasoning, "date": config.today_str(),
     })
 
 
