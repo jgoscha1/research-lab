@@ -236,23 +236,33 @@ def _invested_pct(pf, total=None):
     return (total - config.CASH_BUDGET) / invested_ever * 100
 
 
-def _bench_dollar_series(curve, key, base_value):
-    """Forward-filled benchmark index level for `key`, rescaled so it starts
-    at base_value — the same starting dollar amount as the portfolio curve —
-    so the two can be overlaid on one chart as an apples-to-apples comparison."""
+def _invested_value_series(curve, invested_fallback):
+    """The portfolio's dollar value on an invested-capital basis — starts at
+    $0 and grows only as capital actually gets deployed and that capital
+    earns or loses money, ignoring cash still sitting idle. Same basis as
+    the P&L % stat, so the chart doesn't show something a viewer would read
+    as contradicting that number."""
+    return [round(c.get("invested", invested_fallback) + c["value"] - config.CASH_BUDGET, 2)
+            for c in curve]
+
+
+def _bench_invested_series(curve, key, invested_fallback):
+    """What the capital actually invested so far would be worth had it
+    earned this benchmark's return since inception instead — grown by both
+    more capital being deployed over time and the index's cumulative
+    return — so it's directly comparable to _invested_value_series above."""
     out = []
-    last = None
+    last_level = None
     base_level = None
     for c in curve:
         lvl = c.get("benchmarks", {}).get(key)
         if lvl:
-            last = lvl
+            last_level = lvl
             if base_level is None:
                 base_level = lvl
-        out.append(last)
-    if not base_level or base_value is None:
-        return [None] * len(curve)
-    return [round(base_value * (v / base_level), 2) if v else None for v in out]
+        inv = c.get("invested", invested_fallback)
+        out.append(round(inv * (last_level / base_level), 2) if (base_level and last_level) else None)
+    return out
 
 
 def state_json():
@@ -285,15 +295,15 @@ def state_json():
         cash = pf.s.get("cash", 0.0); curve = pf.s.get("curve", [])
         total = cash + holdings_val
         combined_total += total
-        window = [c["value"] for c in curve][-120:]
-        base_value = window[0] if window else None
-        bench_curves = {b: _bench_dollar_series(curve, b, base_value)[-120:] for b in config.BENCHMARKS}
+        invested_ever = pf.invested_ever()
+        invested_curve = _invested_value_series(curve, invested_ever)[-120:]
+        bench_curves = {b: _bench_invested_series(curve, b, invested_ever)[-120:] for b in config.BENCHMARKS}
         portfolios.append({
             "id": pf.s["id"], "created": pf.s.get("created", ""),
             "total": total, "invested": pf.invested_total(), "cash": cash,
             "pnl_dollar": total - config.CASH_BUDGET,
             "port_pct": _invested_pct(pf, total), "benchmarks": {b: _pct(curve, b) for b in config.BENCHMARKS},
-            "curve": window, "bench_curves": bench_curves,
+            "curve": invested_curve, "bench_curves": bench_curves,
             "open_count": pf.open_count(), "max_open": config.MAX_OPEN_POSITIONS,
             "accepts_new": pf.accepts_new(),
         })
@@ -654,8 +664,9 @@ function render(s){const r=s.run;
      "<span class='stat'><span class='mut'>P&amp;L</span><br><span class='big "+((p.pnl_dollar||0)>=0?'up':'dn')+"'>"+fmtSigned(p.pnl_dollar)+"</span><br><span class='mut'>"+pc(p.port_pct)+" on invested</span></span>"+
      "<span class='stat'><span class='mut'>Positions</span><br><span class='big'>"+p.open_count+"/"+p.max_open+"</span></span>"+
      "<div class='mut' style='margin-top:6px'>since inception, vs "+Object.entries(p.benchmarks).map(([k,v])=>k+' '+pc(v)).join(' \u00b7 ')+"</div>"+
-     "<div style='margin-top:8px'>"+multiChart([{vals:p.curve,color:'#60a5fa',label:'Portfolio'}].concat(
-       Object.entries(p.bench_curves||{}).map(([k,v],idx)=>({vals:v,color:BENCH_COLORS[k]||BENCH_PALETTE[idx%BENCH_PALETTE.length],label:k}))))+"</div></div>";
+     "<div style='margin-top:8px'>"+multiChart([{vals:p.curve,color:'#60a5fa',label:'Invested capital'}].concat(
+       Object.entries(p.bench_curves||{}).map(([k,v],idx)=>({vals:v,color:BENCH_COLORS[k]||BENCH_PALETTE[idx%BENCH_PALETTE.length],label:k}))))+
+     "<p class='mut' style='margin:4px 0 0;font-size:11px'>value of money actually invested so far, vs the same dollars in the index \u2014 idle cash not counted</p></div></div>";
  }).join(''):"<span class='mut'>No portfolio yet \u2014 press Go and one starts automatically.</span>";
  buildFeedTabs(s.researchers); renderFeed();
  $('positions').innerHTML=s.positions.length?s.positions.map((x,i)=>{

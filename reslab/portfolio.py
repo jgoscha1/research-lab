@@ -142,7 +142,7 @@ class Portfolio:
             if p:
                 total += pos["shares"] * p
         self.s["curve"].append({"date": _today(), "value": round(total, 2),
-                                "benchmarks": benchmarks})
+                                "benchmarks": benchmarks, "invested": round(self.invested_ever(), 2)})
         return total
 
     def invested_total(self):
