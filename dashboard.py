@@ -21,7 +21,6 @@ import secrets
 import sys
 import threading
 import time
-from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -118,7 +117,7 @@ def _judge_and_place(st, r, rec, trend_text, trend, bought_note=""):
 def one_cycle(cyc):
     st = _state()
     r = config.RESEARCHERS[cyc % len(config.RESEARCHERS)]
-    today = str(date.today())
+    today = config.today_str()
     pfs = portfolio.load_portfolios(st)
     # Each holding gets at most one buy/hold/sell review per day — once a
     # position has been reviewed today, leave it alone until tomorrow. Scans
@@ -312,7 +311,7 @@ def state_json():
         "closed": closed,
         "events": EVENTS[-400:],
         "researchers": [{"name": r["name"], "judge": r["judge"]} for r in config.RESEARCHERS],
-        "costs": {"today": costs.get("daily", {}).get(str(date.today()), 0.0),
+        "costs": {"today": costs.get("daily", {}).get(config.today_str(), 0.0),
                   "total": costs.get("total", 0.0)},
         "trends": list(reversed(st.get("trends", [])))[-60:],
     }

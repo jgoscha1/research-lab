@@ -5,15 +5,36 @@ Copy .env.example to .env (or set these in your shell / systemd) and edit.
 from __future__ import annotations
 
 import os
+from datetime import date, datetime
 
 
-def _f(name, default): 
+def _f(name, default):
     try: return float(os.environ.get(name, default))
     except Exception: return float(default)
 
 def _i(name, default):
     try: return int(os.environ.get(name, default))
     except Exception: return int(default)
+
+
+# --- Timezone every "today" in the app is computed in (daily hold-review
+# gating, the AI-cost meter's daily bucket, dates shown in the UI) — not the
+# server's own clock, which is usually UTC on a cloud droplet. ---
+RESLAB_TZ = os.environ.get("RESLAB_TZ", "America/Denver")
+try:
+    from zoneinfo import ZoneInfo
+    _TZ = ZoneInfo(RESLAB_TZ)
+except Exception:
+    _TZ = None
+
+
+def today_str() -> str:
+    """Today's date (YYYY-MM-DD) in RESLAB_TZ (Mountain Time by default),
+    so a "day" for review gating / cost tracking rolls over at midnight
+    there, not at UTC midnight."""
+    if _TZ is not None:
+        return str(datetime.now(_TZ).date())
+    return str(date.today())
 
 
 # --- LLM (the researchers + judges run on your Anthropic API key) ---

@@ -133,8 +133,7 @@ def run():
 
 
 def _today():
-    from datetime import date
-    return str(date.today())
+    return config.today_str()
 
 
 def _write(name, text):
