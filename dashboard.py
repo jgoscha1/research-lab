@@ -671,7 +671,7 @@ function render(s){const r=s.run;
  buildFeedTabs(s.researchers); renderFeed();
  $('positions').innerHTML=s.positions.length?s.positions.map((x,i)=>{
    const legs=x.legs.map(l=>'$'+Math.round(l.amount).toLocaleString()+'@$'+l.price).join(' + ');const ch=x.challenges||{};
-   return "<div class='pos'><b>"+x.tk+"</b> <span class='mut'>P"+x.portfolio_id+" \u00b7 "+x.name+" \u00b7 "+x.researcher+"</span>"+
+   return "<div class='pos'><b>"+x.tk+"</b>"+convictionBadge(x.rec&&x.rec.conviction)+" <span class='mut'>P"+x.portfolio_id+" \u00b7 "+x.name+" \u00b7 "+x.researcher+"</span>"+
      "<div class='mut'>Bought $"+(x.buy_price||'\u2014')+" \u2192 $"+(x.cur?x.cur.toFixed(2):'\u2014')+" <span class='"+((x.pnl_pct||0)>=0?'up':'dn')+"'>"+pc(x.pnl_pct)+" ("+fmtSigned(x.pnl)+")</span></div>"+
      "<div class='mut'>Invested "+fmt(x.cost_basis)+" ["+legs+"] \u2192 value "+fmt(x.value)+" \u00b7 challenged "+(ch.total||0)+"\u00d7 (held "+(ch.held||0)+", added "+(ch.added||0)+", trimmed "+(ch.trimmed||0)+")</div>"+
      "<div style='margin-top:6px'>"+((x.rec||x.verdict)?"<button class='mini' onclick='rep("+i+")'>report \u25b8</button> ":"")+"<button class='mini' onclick='chartOf("+i+")'>chart \u25b8</button></div></div>";
@@ -683,6 +683,8 @@ function render(s){const r=s.run;
 let TRENDS_OPEN=new Set(), TREND_MSG={};
 function statusBadge(st){const map={bought:['up','bought'],watch:['mut','watching'],rejected:['dn','rejected'],not_tradeable:['mut','not tradeable']};
  const pair=map[st]||['mut',st]; return "<span class='"+pair[0]+"' style='font-size:11px'>"+pair[1]+"</span>";}
+function convictionBadge(c){if(!c)return '';const map={high:['up','high conviction'],medium:['mut','medium conviction'],low:['dn','low conviction']};
+ const pair=map[(c+'').toLowerCase()]||['mut',c+' conviction']; return " <span class='"+pair[0]+"' style='font-size:11px'>"+pair[1]+"</span>";}
 function renderTrends(list){const el=$('trends'); if(!list){return;}
  if(!list.length){el.innerHTML="<span class='mut'>No trends explored yet — press Go, or suggest one above.</span>";return;}
  el.innerHTML=list.map(t=>{
@@ -690,7 +692,7 @@ function renderTrends(list){const el=$('trends'); if(!list){return;}
    const counts={}; (t.stocks||[]).forEach(s=>counts[s.status]=(counts[s.status]||0)+1);
    const summary=Object.entries(counts).map(([k,v])=>v+' '+k).join(', ')||'no stocks yet';
    const stocksHtml=(t.stocks||[]).length?(t.stocks||[]).map(s=>
-     "<div class='pos'><b>"+s.tk+"</b> "+statusBadge(s.status)+" <span class='mut'>"+(s.name||'')+"</span>"+
+     "<div class='pos'><b>"+s.tk+"</b> "+statusBadge(s.status)+convictionBadge(s.conviction)+" <span class='mut'>"+(s.name||'')+"</span>"+
      (s.thesis?"<div class='mut' style='margin-top:4px'>"+s.thesis+"</div>":"")+
      (s.reasoning?"<div class='mut' style='margin-top:4px'>⚖︎ "+s.reasoning+"</div>":"")+
      "</div>").join(''):"<span class='mut'>no stocks yet</span>";
@@ -716,7 +718,7 @@ async function suggestStock(id){const inp=$('ti_'+id); const tk=inp?inp.value.tr
  const r=await (await fetch(BASE+'/api/trend/stock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trend_id:id,ticker:tk})})).json();
  TREND_MSG[id]=r.result+' (see the conversation feed)'; renderTrends(STATE.trends);}
 function rep(i){const x=STATE.positions[i];const r=x.rec||{};const v=x.verdict||{};
- open2("<h3>"+x.tk+" \u00b7 "+x.name+"</h3>"+(x.trend?"<h4>Trend</h4><p>"+x.trend+"</p>":"")+
+ open2("<h3>"+x.tk+" \u00b7 "+x.name+convictionBadge(r.conviction)+"</h3>"+(x.trend?"<h4>Trend</h4><p>"+x.trend+"</p>":"")+
   "<h4>Thesis</h4><p>"+(r.thesis||x.thesis||'')+"</p>"+(r.valuation?"<h4>Valuation</h4><p>"+r.valuation+"</p>":"")+
   (r.catalyst?"<h4>Catalyst</h4><p>"+r.catalyst+"</p>":"")+(r.risks?"<h4>Risks</h4><p>"+r.risks+"</p>":"")+
   "<h4>\u2696\ufe0e Judge</h4><p>"+(v.reasoning||'')+"</p><p class='mut' style='margin-top:12px'>Not investment advice.</p>");}
