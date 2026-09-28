@@ -236,17 +236,18 @@ def _invested_pct(pf, total=None):
     return (total - config.CASH_BUDGET) / invested_ever * 100
 
 
-def _invested_value_series(curve, invested_fallback):
+def _invested_value_series(curve):
     """The portfolio's dollar value on an invested-capital basis — starts at
     $0 and grows only as capital actually gets deployed and that capital
     earns or loses money, ignoring cash still sitting idle. Same basis as
     the P&L % stat, so the chart doesn't show something a viewer would read
-    as contradicting that number."""
-    return [round(c.get("invested", invested_fallback) + c["value"] - config.CASH_BUDGET, 2)
-            for c in curve]
+    as contradicting that number. `curve` must already be filtered to
+    points that actually recorded "invested" — mixing in older points via
+    a guessed fallback creates a fake jump the moment real data starts."""
+    return [round(c["invested"] + c["value"] - config.CASH_BUDGET, 2) for c in curve]
 
 
-def _bench_invested_series(curve, key, invested_fallback):
+def _bench_invested_series(curve, key):
     """What the capital actually invested so far would be worth had it
     earned this benchmark's return since inception instead — grown by both
     more capital being deployed over time and the index's cumulative
@@ -260,8 +261,7 @@ def _bench_invested_series(curve, key, invested_fallback):
             last_level = lvl
             if base_level is None:
                 base_level = lvl
-        inv = c.get("invested", invested_fallback)
-        out.append(round(inv * (last_level / base_level), 2) if (base_level and last_level) else None)
+        out.append(round(c["invested"] * (last_level / base_level), 2) if (base_level and last_level) else None)
     return out
 
 
@@ -295,9 +295,9 @@ def state_json():
         cash = pf.s.get("cash", 0.0); curve = pf.s.get("curve", [])
         total = cash + holdings_val
         combined_total += total
-        invested_ever = pf.invested_ever()
-        invested_curve = _invested_value_series(curve, invested_ever)[-120:]
-        bench_curves = {b: _bench_invested_series(curve, b, invested_ever)[-120:] for b in config.BENCHMARKS}
+        tracked_curve = [c for c in curve if "invested" in c]
+        invested_curve = _invested_value_series(tracked_curve)[-120:]
+        bench_curves = {b: _bench_invested_series(tracked_curve, b)[-120:] for b in config.BENCHMARKS}
         portfolios.append({
             "id": pf.s["id"], "created": pf.s.get("created", ""),
             "total": total, "invested": pf.invested_total(), "cash": cash,
